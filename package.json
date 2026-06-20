@@ -1,0 +1,12 @@
+{
+  "name": "test_network",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "script\\build.bat",
+    "train": "train.exe",
+    "train:load": "train.exe load",
+    "gen": "train.exe gen",
+    "start": "npm run build && npm run train"
+  }
+}

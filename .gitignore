@@ -1,0 +1,30 @@
+# 编译产物
+train.exe
+tmp/
+
+# 训练权重
+output/
+weights_no_energy_loss.bin
+weights_no_energy_loss_report.txt
+
+# 训练日志 & 场快照
+log/
+*.png
+*.csv
+
+# Reasonix 工具配置
+.reasonix/
+reasonix.toml
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+
+# 旧备份
+srcback.zip
+
+# 场可视化输出
+1/

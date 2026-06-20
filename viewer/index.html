@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>A-Network 场查看器</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+h1 { font-size: 18px; margin-bottom: 12px; color: #aad; }
+#drop-zone {
+    border: 2px dashed #558; border-radius: 10px; padding: 30px; text-align: center;
+    cursor: pointer; background: #16213e; transition: .2s; margin-bottom: 16px;
+}
+#drop-zone.dragover { border-color: #8af; background: #1a2a4e; }
+#drop-zone input { display: none; }
+#info { font-size: 13px; margin-bottom: 12px; color: #99b; min-height: 20px; }
+
+.viewer-grid {
+    display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;
+}
+.view-panel {
+    background: #0f3460; border-radius: 8px; padding: 10px; text-align: center;
+}
+.view-panel .label { font-size: 12px; color: #8ae; margin-bottom: 4px; }
+.view-panel canvas {
+    display: block; image-rendering: pixelated; cursor: crosshair;
+    border: 1px solid #225; border-radius: 4px;
+}
+#crosshair-info {
+    font-size: 13px; color: #aac; margin-top: 10px; min-height: 22px;
+    text-align: center;
+}
+#slider-row {
+    display: flex; align-items: center; gap: 12px; margin-top: 12px;
+    max-width: 800px; margin-left: auto; margin-right: auto;
+}
+#slider-row input { flex: 1; accent-color: #4af; }
+#slider-row span { font-size: 13px; color: #8ae; min-width: 80px; text-align: right; }
+.file-list { margin-top: 16px; max-height: 120px; overflow-y: auto; font-size: 12px; color: #889; }
+.file-list div { padding: 2px 0; cursor: pointer; }
+.file-list div:hover { color: #aef; }
+.file-list .active { color: #4ef; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>🔬 A-Network 场查看器</h1>
+
+<div id="drop-zone">
+    📂 拖放 .bin 文件到这里，或点击选择文件
+    <input type="file" id="file-input" accept=".bin" multiple>
+</div>
+
+<div id="info">未加载文件</div>
+
+<div class="viewer-grid">
+    <div class="view-panel">
+        <div class="label">XY 平面 (z 切片)</div>
+        <canvas id="cv-xy" width="320" height="320"></canvas>
+    </div>
+    <div class="view-panel">
+        <div class="label">XZ 平面 (y 切片)</div>
+        <canvas id="cv-xz" width="320" height="320"></canvas>
+    </div>
+    <div class="view-panel">
+        <div class="label">YZ 平面 (x 切片)</div>
+        <canvas id="cv-yz" width="320" height="320"></canvas>
+    </div>
+</div>
+
+<div id="crosshair-info">鼠标悬停在任一视图上查看数值</div>
+
+<div id="slider-row">
+    <span id="slice-label">切片 z = 32</span>
+    <input type="range" id="slice-slider" min="0" max="63" value="32">
+    <span id="slice-pos">32 / 63</span>
+</div>
+
+<div id="file-list" class="file-list"></div>
+
+<script>
+const SZ = 64;
+const CANVAS_SIZE = 320;
+const CELL = CANVAS_SIZE / SZ; // 5
+
+let files = [];        // { name, epoch, step, data: Float32Array }
+let currentIdx = -1;
+let currentSlice = 32; // z index for XY view
+
+const xyCanvas = document.getElementById('cv-xy');
+const xzCanvas = document.getElementById('cv-xz');
+const yzCanvas = document.getElementById('cv-yz');
+const xyCtx = xyCanvas.getContext('2d');
+const xzCtx = xzCanvas.getContext('2d');
+const yzCtx = yzCanvas.getContext('2d');
+
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const infoDiv = document.getElementById('info');
+const crosshairInfo = document.getElementById('crosshair-info');
+const sliceSlider = document.getElementById('slice-slider');
+const sliceLabel = document.getElementById('slice-label');
+const slicePos = document.getElementById('slice-pos');
+const fileListDiv = document.getElementById('file-list');
+
+// ── 颜色映射（viridis-like） ──
+function heatColor(t) {
+    t = Math.max(0, Math.min(1, t));
+    const r = Math.min(1, t * 1.5);
+    const g = Math.min(1, Math.pow(t, 0.6) * 1.2);
+    const b = Math.min(1, Math.pow(t, 0.3) * 0.8);
+    return `rgb(${(r*255)|0},${(g*255)|0},${(b*255)|0})`;
+}
+
+// ── 读取文件 ──
+function parseFileName(name) {
+    const m = name.match(/_e(\d+)_t(\d+)/);
+    if (m) return { epoch: parseInt(m[1]), step: parseInt(m[2]) };
+    return { epoch: -1, step: -1 };
+}
+
+function loadFile(file) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const arr = new Float32Array(e.target.result);
+        if (arr.length !== SZ * SZ * SZ) {
+            alert(`文件大小不符：期望 ${SZ*SZ*SZ} float32，实际 ${arr.length}`);
+            return;
+        }
+        const meta = parseFileName(file.name);
+        const idx = files.length;
+        files.push({ name: file.name, ...meta, data: arr });
+        updateFileList();
+        if (currentIdx < 0) selectFile(0);
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+function selectFile(idx) {
+    if (idx < 0 || idx >= files.length) return;
+    currentIdx = idx;
+    const f = files[idx];
+    infoDiv.textContent = `📄 ${f.name}  |  epoch ${f.epoch}  |  step ${f.step}  |  64 × 64 × 64`;
+    updateFileList();
+    renderAll();
+}
+
+// ── 文件列表 ──
+function updateFileList() {
+    fileListDiv.innerHTML = '';
+    files.forEach((f, i) => {
+        const d = document.createElement('div');
+        d.textContent = `📄 ${f.name}  (e${f.epoch} t${f.step})`;
+        if (i === currentIdx) d.className = 'active';
+        d.onclick = () => selectFile(i);
+        fileListDiv.appendChild(d);
+    });
+}
+
+// ── 获取值 ──
+function getVoxel(field, x, y, z) {
+    return field[(y * SZ + x) * SZ + z];
+}
+
+function getMinMax(field) {
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < field.length; i++) {
+        const v = field[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    return { min: mn, max: mx };
+}
+
+// ── 渲染 ──
+function renderView(ctx, field, sliceAxis, sliceIdx) {
+    const imgData = ctx.createImageData(CANVAS_SIZE, CANVAS_SIZE);
+    const data = imgData.data;
+    const mm = getMinMax(field);
+    const range = mm.max - mm.min || 1;
+
+    for (let py = 0; py < SZ; py++) {
+        for (let px = 0; px < SZ; px++) {
+            let val;
+            if (sliceAxis === 'z') {
+                val = getVoxel(field, px, py, sliceIdx);
+            } else if (sliceAxis === 'y') {
+                val = getVoxel(field, px, sliceIdx, py);
+            } else { // x
+                val = getVoxel(field, sliceIdx, px, py);
+            }
+            const t = (val - mm.min) / range;
+            const col = heatColor(t);
+            const [r, g, b] = col.match(/\d+/g).map(Number);
+            for (let dy = 0; dy < CELL; dy++) {
+                for (let dx = 0; dx < CELL; dx++) {
+                    const idx = ((py * CELL + dy) * CANVAS_SIZE + (px * CELL + dx)) * 4;
+                    data[idx] = r;
+                    data[idx + 1] = g;
+                    data[idx + 2] = b;
+                    data[idx + 3] = 255;
+                }
+            }
+        }
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+function renderAll() {
+    if (currentIdx < 0) return;
+    const field = files[currentIdx].data;
+    const z = currentSlice;
+    const y = currentSlice;
+    const x = currentSlice;
+    renderView(xyCtx, field, 'z', z);
+    renderView(xzCtx, field, 'y', y);
+    renderView(yzCtx, field, 'x', x);
+    sliceLabel.textContent = `切片 z = ${z}`;
+    slicePos.textContent = `${z} / 63`;
+    crosshairInfo.textContent = '鼠标悬停在任一视图上查看数值';
+}
+
+// ── 取鼠标位置下的数值 ──
+function handleMouseMove(evt, canvas, sliceAxis) {
+    if (currentIdx < 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = evt.clientX - rect.left;
+    const my = evt.clientY - rect.top;
+    const px = Math.floor(mx / CELL);
+    const py = Math.floor(my / CELL);
+    if (px < 0 || px >= SZ || py < 0 || py >= SZ) return;
+
+    const field = files[currentIdx].data;
+    let val, coord;
+    if (sliceAxis === 'z') {
+        val = getVoxel(field, px, py, currentSlice);
+        coord = `(${px}, ${py}, ${currentSlice})`;
+    } else if (sliceAxis === 'y') {
+        val = getVoxel(field, px, currentSlice, py);
+        coord = `(${px}, ${currentSlice}, ${py})`;
+    } else {
+        val = getVoxel(field, currentSlice, px, py);
+        coord = `(${currentSlice}, ${px}, ${py})`;
+    }
+    crosshairInfo.textContent = `坐标 ${coord}  值 = ${val.toFixed(4)}`;
+}
+
+// ── 事件绑定 ──
+dropZone.onclick = () => fileInput.click();
+dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
+dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+dropZone.ondrop = (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    for (const f of e.dataTransfer.files) loadFile(f);
+};
+fileInput.onchange = () => {
+    for (const f of fileInput.files) loadFile(f);
+    fileInput.value = '';
+};
+
+sliceSlider.oninput = function() {
+    currentSlice = parseInt(this.value);
+    renderAll();
+};
+
+document.addEventListener('wheel', function(e) {
+    if (currentIdx < 0) return;
+    const delta = e.deltaY > 0 ? 1 : -1;
+    currentSlice = Math.max(0, Math.min(63, currentSlice + delta));
+    sliceSlider.value = currentSlice;
+    renderAll();
+}, { passive: true });
+
+xyCanvas.onmousemove = (e) => handleMouseMove(e, xyCanvas, 'z');
+xzCanvas.onmousemove = (e) => handleMouseMove(e, xzCanvas, 'y');
+yzCanvas.onmousemove = (e) => handleMouseMove(e, yzCanvas, 'x');
+
+// ── 键盘导航 ──
+document.addEventListener('keydown', function(e) {
+    if (currentIdx < 0) return;
+    if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        currentSlice = Math.max(0, currentSlice - 1);
+        sliceSlider.value = currentSlice;
+        renderAll();
+        e.preventDefault();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        currentSlice = Math.min(63, currentSlice + 1);
+        sliceSlider.value = currentSlice;
+        renderAll();
+        e.preventDefault();
+    } else if (e.key === 'n' || e.key === 'N') {
+        // 下一个文件
+        if (files.length > 0) selectFile((currentIdx + 1) % files.length);
+    } else if (e.key === 'p' || e.key === 'P') {
+        // 上一个文件
+        if (files.length > 0) selectFile((currentIdx - 1 + files.length) % files.length);
+    }
+});
+
+// ── 帮助提示 ──
+infoDiv.textContent = '拖放 .bin 文件到上方区域，或点击选择文件';
+crosshairInfo.textContent = '快捷键: ↑↓/←→ 切层  N下一个  P上一个';
+</script>
+</body>
+</html>
