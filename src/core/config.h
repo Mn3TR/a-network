@@ -13,7 +13,7 @@ constexpr size_t g_grad_accum = 4;
 constexpr float g_lr = 0.0001f;       // 初始学习率
 constexpr float g_lr_min = 0.000001f; // 最低学习率（退火终点）
 constexpr float g_mu = 0.9f;          // 动量系数
-constexpr float g_clip_norm = 50.0f;    // 梯度裁剪阈值（基于实际梯度量级 ~60 设定）
+constexpr float g_clip_norm = 50.0f;    // 梯度裁剪阈值
 
 // 训练终止条件
 constexpr int g_max_epochs = 100;       // 最多 epoch 数（训练终止条件之一）

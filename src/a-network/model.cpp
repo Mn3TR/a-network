@@ -10,97 +10,62 @@
 
 void init_all()
 {
-    size_t H = g_hidden_dim, N = ::N, P = g_proj_dim;
+    size_t H = g_hidden_dim, N = ::N;
 
     // 确保结构/工作区都已分配（不含权重随机化，由 init_*_weights 负责）
     init_convert_workspace();
     init_propagation();
     init_readout_workspace();
 
-    // 梯度缓冲（注意 g_out_weight_grad/bias_grad 现在是 [H×P]/[P]）
+    // 梯度缓冲 + 前向传播激活值保存
     g_embed_grad.resize(g_vocab_size * H, 0.0f);
     g_in_weight_grad.resize(H * N, 0.0f);
     g_in_bias_grad.resize(N, 0.0f);
-    g_out_weight_grad.resize(H * P, 0.0f);
-    g_out_bias_grad.resize(P, 0.0f);
+    g_out_weight_grad.resize(H * N, 0.0f);
+    g_out_bias_grad.resize(N, 0.0f);
     g_prop_grad.resize(N, 0.0f);
     g_prop_act.resize(g_prop_steps);
     for (auto& v : g_prop_act)
         v.resize(N);
 }
 
-// ============ 读 h：field → 固定随机投影 R → tmp[128] → W_out → h[192] ============
+// ============ 读 h：field → W_out → h ============
 static void readout_h(const float* flat_net, float* h_out)
 {
-    size_t H = g_hidden_dim, P = g_proj_dim, N = ::N;
-
-    // tmp = R · field（固定随机投影，保距嵌入）
+    size_t H = g_hidden_dim, N = ::N;
     #pragma omp parallel for
-    for (int k = 0; k < static_cast<int>(P); ++k) {
+    for (int n = 0; n < static_cast<int>(N); ++n)
+        g_diff[n] = flat_net[n] - g_out_bias[n];
+    #pragma omp parallel for
+    for (int k = 0; k < static_cast<int>(H); ++k) {
         float sum = 0.0f;
-        const float* row = g_proj_fixed.data() + static_cast<size_t>(k) * N;
-        for (size_t n = 0; n < N; ++n)
-            sum += row[n] * flat_net[n];
-        g_proj_tmp[static_cast<size_t>(k)] = sum;
-    }
-
-    // g_diff = tmp - bias
-    #pragma omp parallel for
-    for (int k = 0; k < static_cast<int>(P); ++k)
-        g_diff[k] = g_proj_tmp[k] - g_out_bias[k];
-
-    // h = W_out · (tmp - bias)，W_out 仅 [192×128] = 24K 参数，当不了 FFN
-    #pragma omp parallel for
-    for (int j = 0; j < static_cast<int>(H); ++j) {
-        float sum = 0.0f;
-        const float* row = g_out_weight.data() + static_cast<size_t>(j) * P;
-        for (size_t k = 0; k < P; ++k)
-            sum += row[k] * g_diff[k];
-        h_out[static_cast<size_t>(j)] = sum;
+        const float* row = g_out_weight.data() + static_cast<size_t>(k) * N;
+        for (size_t n = 0; n < N; ++n) sum += row[n] * g_diff[n];
+        h_out[static_cast<size_t>(k)] = sum;
     }
 }
 
-// ============ h 反向：d_h → W_out^T → d_g_diff → R_fixed^T → d_network ============
+// ============ h 反向：d_h → W_out^T → d_network ============
 static void backward_readout_h(const float* d_h, float* d_network)
 {
-    size_t H = g_hidden_dim, P = g_proj_dim, N = ::N;
-
-    // d_g_diff = W_out^T · d_h
-    static std::vector<float> d_g_diff;
-    d_g_diff.resize(P);
-    #pragma omp parallel for
-    for (int k = 0; k < static_cast<int>(P); ++k) {
-        float sum = 0.0f;
-        size_t uk = static_cast<size_t>(k);
-        for (size_t j = 0; j < H; ++j)
-            sum += d_h[j] * g_out_weight[j * P + uk];
-        d_g_diff[uk] = sum;
-    }
-
-    // d_network = R_fixed^T · d_g_diff（梯度回传入场）
+    size_t H = g_hidden_dim, N = ::N;
     #pragma omp parallel for
     for (int n = 0; n < static_cast<int>(N); ++n) {
         float sum = 0.0f;
-        size_t un = static_cast<size_t>(n);
-        for (size_t k = 0; k < P; ++k)
-            sum += g_proj_fixed[k * N + un] * d_g_diff[k];
-        d_network[un] = sum;
+        for (size_t k = 0; k < H; ++k)
+            sum += d_h[k] * g_out_weight[k * N + static_cast<size_t>(n)];
+        d_network[n] = sum;
     }
-
-    // g_out_weight_grad[j, k] += d_h[j] · g_diff[k]
     #pragma omp parallel for
-    for (int j = 0; j < static_cast<int>(H); ++j) {
-        float dhj = d_h[static_cast<size_t>(j)];
-        if (dhj == 0.0f) continue;
-        float* row = g_out_weight_grad.data() + static_cast<size_t>(j) * P;
-        for (size_t k = 0; k < P; ++k)
-            row[k] += dhj * g_diff[k];
+    for (int k = 0; k < static_cast<int>(H); ++k) {
+        float dhk = d_h[static_cast<size_t>(k)];
+        if (dhk == 0.0f) continue;
+        float* row = g_out_weight_grad.data() + static_cast<size_t>(k) * N;
+        for (size_t n = 0; n < N; ++n) row[n] += dhk * g_diff[n];
     }
-
-    // g_out_bias_grad = -d_g_diff
     #pragma omp parallel for
-    for (int k = 0; k < static_cast<int>(P); ++k)
-        g_out_bias_grad[k] -= d_g_diff[k];
+    for (int n = 0; n < static_cast<int>(N); ++n)
+        g_out_bias_grad[n] -= d_network[n];
 }
 
 // ============ 采样 Softmax + Loss ============

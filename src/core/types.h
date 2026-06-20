@@ -11,7 +11,7 @@ using NetworkView = std::mdspan<float, std::extents<size_t, network_x, network_y
 
 // ============ ConvertLayer 常量 ============
 constexpr size_t g_vocab_size = 128256;
-constexpr size_t g_hidden_dim = 192;
+constexpr size_t g_hidden_dim = 48;
 
 // ============ 传播常量 ============
 constexpr float g_time_decay = 0.9f;

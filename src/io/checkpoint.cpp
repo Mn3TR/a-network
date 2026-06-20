@@ -1,7 +1,6 @@
 #include "checkpoint.h"
 #include "core/config.h"
 #include "core/types.h"
-#include "a-network/config.h"  // g_proj_dim
 #include "a-network/convert.h"
 #include "a-network/field.h"
 #include "a-network/readout.h"
@@ -101,12 +100,7 @@ void load_weights()
     }
 
     g_incoming.resize(N, 0.0f);
-
-    // 初始化投影工作区（固定种子重建，不覆盖已加载的 W_out/bias）
-    g_proj_fixed.resize(g_proj_dim * N);
-    g_diff.resize(g_proj_dim);
-    g_proj_tmp.resize(g_proj_dim);
-    init_random_projection();
+    g_diff.resize(N);
 
     g_skip_ptr.assign(N + 1, 0);
     g_skip_dst.clear();
