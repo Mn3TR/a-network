@@ -1,33 +1,40 @@
 #include "optimizer.h"
-#include "a-network/convert.h"   // g_embed_weight, g_proj_weight, g_proj_bias
-#include "a-network/field.h"     // g_prop_weight
-#include "a-network/backward.h"  // gradient buffers
+#include "a-network/convert.h"     // g_embed_weight, g_in_weight, g_in_bias
+#include "a-network/readout.h"     // g_out_weight, g_out_bias
+#include "a-network/field.h"       // g_prop_weight, g_skip_weight
+#include "a-network/backward.h"    // gradient buffers
 #include <cmath>
 #include <fstream>
+#include <sstream>
 
 SGDMomentum g_optim;
 
-// ============ 初始化 ============
 void SGDMomentum::init()
 {
     buf_embed.resize(g_embed_weight.size(), 0.0f);
-    buf_proj.resize(g_proj_weight.size(), 0.0f);
-    buf_bias.resize(g_proj_bias.size(), 0.0f);
+    buf_in_weight.resize(g_in_weight.size(), 0.0f);
+    buf_in_bias.resize(g_in_bias.size(), 0.0f);
+    buf_out_weight.resize(g_out_weight.size(), 0.0f);
+    buf_out_bias.resize(g_out_bias.size(), 0.0f);
     buf_prop.resize(g_prop_weight.size(), 0.0f);
-    buf_skip.resize(g_skip_weight.size(), 0.0f);
+    if (!g_skip_weight.empty())
+        buf_skip.resize(g_skip_weight.size(), 0.0f);
 }
 
-// ============ 参数更新 ============
 void SGDMomentum::step()
 {
     auto upd = [&](std::vector<float>& w, std::vector<float>& b,
-                   const std::vector<float>& g) {
-        // 逐层梯度裁剪：每层独立 norm、独立 clip
+                   const std::vector<float>& g, float* out_norm) {
+        if (w.empty() || g.empty()) { if (out_norm) *out_norm = 0.0f; return; }
         double n2 = 0.0;
-        for (auto v : g) n2 += static_cast<double>(v) * v;
+        #pragma omp parallel for reduction(+:n2)
+        for (int i = 0; i < static_cast<int>(g.size()); ++i)
+            n2 += static_cast<double>(g[i]) * g[i];
+        float norm = static_cast<float>(std::sqrt(n2));
+        if (out_norm) *out_norm = norm;
         float s = 1.0f;
         if (n2 > static_cast<double>(clip_norm) * clip_norm)
-            s = clip_norm / static_cast<float>(std::sqrt(n2));
+            s = clip_norm / norm;
 
         #pragma omp parallel for
         for (int i = 0; i < static_cast<int>(w.size()); ++i) {
@@ -36,65 +43,75 @@ void SGDMomentum::step()
             w[i] -= lr * b[i];
         }
     };
-    upd(g_embed_weight, buf_embed, g_embed_grad);
-    upd(g_proj_weight, buf_proj, g_proj_grad);
-    upd(g_proj_bias, buf_bias, g_bias_grad);
-    upd(g_prop_weight, buf_prop, g_prop_grad);
+
+    upd(g_embed_weight,  buf_embed,       g_embed_grad,       &m_cache_embed);
+    upd(g_in_weight,     buf_in_weight,   g_in_weight_grad,   &m_cache_in_w);
+    upd(g_in_bias,       buf_in_bias,     g_in_bias_grad,     &m_cache_in_b);
+    upd(g_out_weight,    buf_out_weight,  g_out_weight_grad,  &m_cache_out_w);
+    upd(g_out_bias,      buf_out_bias,    g_out_bias_grad,    &m_cache_out_b);
+    upd(g_prop_weight,   buf_prop,        g_prop_grad,        &m_cache_prop);
     if (!g_skip_weight.empty())
-        upd(g_skip_weight, buf_skip, g_skip_grad);
+        upd(g_skip_weight, buf_skip, g_skip_grad, &m_cache_skip);
+    else
+        m_cache_skip = 0.0f;
 }
 
 void SGDMomentum::zero_grad()
 {
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(g_embed_grad.size()); ++i)
-        g_embed_grad[i] = 0.0f;
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(g_proj_grad.size()); ++i)
-        g_proj_grad[i] = 0.0f;
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(g_bias_grad.size()); ++i)
-        g_bias_grad[i] = 0.0f;
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(g_prop_grad.size()); ++i)
-        g_prop_grad[i] = 0.0f;
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(g_skip_grad.size()); ++i)
-        g_skip_grad[i] = 0.0f;
+    auto zero = [](std::vector<float>& v) {
+        if (v.empty()) return;
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(v.size()); ++i)
+            v[i] = 0.0f;
+    };
+
+    zero(g_embed_grad);
+    zero(g_in_weight_grad);
+    zero(g_in_bias_grad);
+    zero(g_out_weight_grad);
+    zero(g_out_bias_grad);
+    zero(g_prop_grad);
+    zero(g_skip_grad);
 }
 
-// ============ 梯度日志 ============
-static float grad_norm(const std::vector<float>& g)
+void SGDMomentum::flush_log(const char* path)
 {
-    double sum = 0.0;
-    for (auto v : g) sum += static_cast<double>(v) * v;
-    return static_cast<float>(std::sqrt(sum));
-}
-
-void SGDMomentum::log_grad(const char* path)
-{
+    if (log_buffer.empty()) return;
     static bool first = true;
     std::ofstream file;
     if (first) {
         file.open(path, std::ios::trunc);
-        file << "step,embed_norm,proj_norm,bias_norm,prop_norm,skip_norm\n";
+        file << "step,embed,in_w,in_b,out_w,out_b,prop,skip\n";
         first = false;
     } else {
         file.open(path, std::ios::app);
     }
-    static int step_counter = 0;
-    file << (step_counter++) << ","
-         << grad_norm(g_embed_grad) << ","
-         << grad_norm(g_proj_grad) << ","
-         << grad_norm(g_bias_grad) << ","
-         << grad_norm(g_prop_grad) << ","
-         << grad_norm(g_skip_grad) << "\n";
+    file << log_buffer;
+    log_buffer.clear();
+    log_line_count = 0;
 }
 
-// ============ 学习率退火 ============
+void SGDMomentum::log_grad(const char* path)
+{
+    static int step_counter = 0;
+    std::ostringstream line;
+    line << (step_counter++) << ","
+         << m_cache_embed << ","
+         << m_cache_in_w << ","
+         << m_cache_in_b << ","
+         << m_cache_out_w << ","
+         << m_cache_out_b << ","
+         << m_cache_prop << ","
+         << m_cache_skip << "\n";
+    log_buffer += line.str();
+    ++log_line_count;
+
+    if (log_line_count >= log_flush_interval)
+        flush_log(path);
+}
+
 static constexpr float PI = 3.14159265358979323846f;
 
-// 余弦退火：从 g_lr 平滑降到 g_lr_min
 void lr_schedule(int epoch, int total_epochs)
 {
     if (total_epochs <= 1) return;

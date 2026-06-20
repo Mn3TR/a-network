@@ -1,12 +1,14 @@
 #pragma once
 #include "core/types.h"
 #include "core/config.h"
-#include "config.h"   // A-Network 专有超参
+#include "config.h"
 #include <vector>
 
-// 初始化整个 A Network 组件（权重 + 传播 + 训练状态）
 void init_all();
 
-// 单个 token 的训练步骤（前向 + 反向 + loss）
-float train_token(size_t input_id, size_t target_id, float* flat_net,
-                  float* incoming_buf);
+// 单 token 训练：注入 → 传播 → 读出 h → LM Head → loss
+float train_token(size_t input_id, size_t target_id,
+                  float* flat_net, float* incoming_buf);
+
+// 生成模式：注入 → 传播 → 读出 h → LM Head → argmax
+size_t generate_token(size_t input_id, float* flat_net, float* incoming_buf);

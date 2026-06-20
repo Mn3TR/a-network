@@ -13,14 +13,11 @@ constexpr size_t g_grad_accum = 4;
 constexpr float g_lr = 0.0001f;       // 初始学习率
 constexpr float g_lr_min = 0.000001f; // 最低学习率（退火终点）
 constexpr float g_mu = 0.9f;          // 动量系数
-constexpr float g_clip_norm = 1e6f;    // 梯度裁剪阈值（防 NaN 兜底，不干扰正常训练）
+constexpr float g_clip_norm = 50.0f;    // 梯度裁剪阈值（基于实际梯度量级 ~60 设定）
 
 // 训练终止条件
 constexpr int g_max_epochs = 100;       // 最多 epoch 数（训练终止条件之一）
 constexpr float g_min_loss = 0.01f;    // loss 低于此值则提前停止
-
-// 暖场步数（前 K 个 token 只注入传播，不算 loss，让场建立初始结构）
-constexpr size_t g_warmup_steps = 3;
 
 // 路径
 constexpr const char* g_weights_path = "output/weights.bin";

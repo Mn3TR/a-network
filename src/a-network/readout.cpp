@@ -1,46 +1,71 @@
 #include "readout.h"
-#include "convert.h"  // g_embed_weight, g_proj_weight, g_proj_bias
+#include "config.h"     // g_proj_dim
+#include "convert.h"    // g_embed_weight
 #include <cmath>
 #include <algorithm>
+#include <random>
 
-// Readout 工作区
-std::vector<float> g_diff;
-std::vector<float> g_logits_d;
+// 固定随机投影矩阵（不训练）
+std::vector<float> g_proj_fixed;  // [P, N]
+
+// 可学习的小读出矩阵
+std::vector<float> g_out_weight;   // [H, P]
+std::vector<float> g_out_bias;     // [P]
+
+// 工作区
+std::vector<float> g_diff;         // [P] — tmp - bias
+std::vector<float> g_proj_tmp;     // [P] — 投影后的 tmp
+
+void init_random_projection()
+{
+    static bool once = false;
+    if (once) return;
+    once = true;
+
+    size_t P = g_proj_dim, N = ::N;
+
+    // 固定种子确保可复现
+    std::mt19937 gen(42);
+    // U(-√(3/P), √(3/P))，使 E[||R·x||²] = ||x||²
+    float proj_scale = std::sqrt(3.0f / static_cast<float>(P));
+    std::uniform_real_distribution<float> proj_dist(-proj_scale, proj_scale);
+    for (auto& r : g_proj_fixed) r = proj_dist(gen);
+}
 
 void init_readout_workspace()
 {
-    g_diff.resize(N);
-    g_logits_d.resize(g_hidden_dim);
+    size_t H = g_hidden_dim;
+    size_t P = g_proj_dim;
+    size_t N = ::N;
+
+    g_proj_fixed.resize(P * N);
+    g_out_weight.resize(H * P);
+    g_out_bias.resize(P);
+    g_diff.resize(P);
+    g_proj_tmp.resize(P);
+
+    // 首次调用时填充投影矩阵（幂等：后续调用不再覆盖）
+    init_random_projection();
 }
 
-// ============ Readout 前向 ============
-void forward_readout(const float* flat_net, float* logits_v_out)
+void init_readout_weights()
 {
-    #pragma omp parallel for
-    for (int j = 0; j < static_cast<int>(N); ++j)
-        g_diff[j] = flat_net[j] - g_proj_bias[j];
+    size_t H = g_hidden_dim;
+    size_t P = g_proj_dim;
 
-    std::fill(g_logits_d.begin(), g_logits_d.end(), 0.0f);
-    #pragma omp parallel for
-    for (int k = 0; k < static_cast<int>(g_hidden_dim); ++k) {
-        float sum = 0.0f;
-        const float* row = g_proj_weight.data() + static_cast<size_t>(k) * N;
-        for (size_t j = 0; j < N; ++j)
-            sum += g_diff[j] * row[j];
-        g_logits_d[static_cast<size_t>(k)] = sum;
-    }
+    init_readout_workspace();  // 分配 + 填充 R
 
-    #pragma omp parallel for
-    for (int t = 0; t < static_cast<int>(g_vocab_size); ++t) {
-        float sum = 0.0f;
-        const float* row = g_embed_weight.data() + static_cast<size_t>(t) * g_hidden_dim;
-        for (size_t k = 0; k < g_hidden_dim; ++k)
-            sum += g_logits_d[k] * row[k];
-        logits_v_out[static_cast<size_t>(t)] = sum;
-    }
+    // 随机初始化 W_out
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    float out_scale = std::sqrt(6.0f / static_cast<float>(H + P));
+    std::uniform_real_distribution<float> out_dist(-out_scale, out_scale);
+    for (auto& w : g_out_weight) w = out_dist(gen);
+    std::fill(g_out_bias.begin(), g_out_bias.end(), 0.0f);
 }
 
-// ============ Cross Entropy Loss ============
+// ============ Cross Entropy Loss（不变） ============
 float cross_entropy_loss(const float* logits, size_t target_id, float* d_logits)
 {
     float max_val = logits[0];

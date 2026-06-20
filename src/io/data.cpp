@@ -26,13 +26,11 @@ void DataLoader::load_txt(const std::string& path)
 
     auto new_tokens = sentencepiece_to_tokens(text);
 
-    // 每篇文本加 BOS(0) 和 EOS(1)，让模型学会句子边界
-    tokens.push_back(0);  // <|begin_of_sentence|>
+    // 不加 BOS/EOS：每篇文本直接拼接，减少梯度震荡
     tokens.insert(tokens.end(), new_tokens.begin(), new_tokens.end());
-    tokens.push_back(1);  // <|end_of_sentence|>
 
     std::cout << "  " << path << ": " << text.size() << " chars -> "
-              << (new_tokens.size() + 2) << " tokens (with BOS+EOS)" << std::endl;
+              << new_tokens.size() << " tokens" << std::endl;
 }
 
 void DataLoader::load_dir(const std::string& dir_path)

@@ -19,10 +19,17 @@ const size_t g_num_neighbors = 26;
 std::vector<float> g_prop_weight;
 std::vector<float> g_incoming;
 
+std::vector<uint32_t> g_cell_x;
+std::vector<uint32_t> g_cell_y;
+std::vector<uint32_t> g_cell_z;
+
 std::vector<uint32_t> g_skip_ptr;
 std::vector<uint32_t> g_skip_dst;
 std::vector<float>    g_skip_weight;
 std::vector<float>    g_skip_grad;
+
+std::vector<uint32_t> g_rev_skip_ptr;
+std::vector<uint32_t> g_rev_skip_src;
 
 // 检查两个细胞是否为 26-邻域邻居（含自身）
 static bool is_too_close(uint32_t a, uint32_t b)
@@ -42,124 +49,187 @@ static bool is_too_close(uint32_t a, uint32_t b)
     return std::abs(dx) <= 1 && std::abs(dy) <= 1 && std::abs(dz) <= 1;
 }
 
+// 构建坐标查找表（消除内层循环的除法和取模）。幂等，所有模式调用。
+static void build_coord_tables()
+{
+    g_cell_x.resize(N);
+    g_cell_y.resize(N);
+    g_cell_z.resize(N);
+    for (size_t idx = 0; idx < N; ++idx) {
+        uint32_t yz = static_cast<uint32_t>(idx % (network_y * network_z));
+        g_cell_x[idx] = static_cast<uint32_t>(idx / (network_y * network_z));
+        g_cell_y[idx] = yz / static_cast<uint32_t>(network_z);
+        g_cell_z[idx] = yz % static_cast<uint32_t>(network_z);
+    }
+}
+
+// 生成随机长程跳跃连接拓扑 + 随机权重。仅在训练新模型时调用（once 守卫）。
+static void build_skip_connections(std::mt19937& gen,
+                                   std::uniform_real_distribution<float>& dist)
+{
+    if (g_skip_density <= 0.0f) return;
+
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+    std::uniform_real_distribution<float> prob_dist(0.0f, 1.0f);
+    std::uniform_int_distribution<int> coord_dist(0, static_cast<int>(network_x - 1));
+
+    for (uint32_t idx = 0; idx < N; ++idx) {
+        if (prob_dist(gen) >= g_skip_density) continue;
+
+        // 随机选择一个「远处」目标（排斥自身及 26 邻域）
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            uint32_t tx = static_cast<uint32_t>(coord_dist(gen));
+            uint32_t ty = static_cast<uint32_t>(coord_dist(gen));
+            uint32_t tz = static_cast<uint32_t>(coord_dist(gen));
+            uint32_t target = tx * network_y * network_z
+                            + ty * network_z + tz;
+            if (!is_too_close(idx, target)) {
+                edges.emplace_back(idx, target);
+                break;
+            }
+        }
+    }
+
+    // 按 src 排序，构建正向 CSR
+    std::sort(edges.begin(), edges.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    size_t nc = edges.size();
+    g_skip_dst.resize(nc);
+    g_skip_weight.resize(nc);
+    for (size_t i = 0; i < nc; ++i)
+        g_skip_dst[i] = edges[i].second;
+
+    // 权重初始化：与本地传播相同的量级
+    for (auto& w : g_skip_weight) w = dist(gen);
+
+    // 构建正向 ptr
+    size_t e = 0;
+    for (uint32_t idx = 0; idx < N; ++idx) {
+        g_skip_ptr[idx] = static_cast<uint32_t>(e);
+        while (e < nc && edges[e].first == idx) ++e;
+    }
+    g_skip_ptr[N] = static_cast<uint32_t>(nc);
+
+    g_skip_grad.assign(nc, 0.0f);
+
+    std::cout << "Skip connections generated: " << nc
+              << " (density=" << (g_skip_density * 100.0f) << "%)" << std::endl;
+
+    // ============ 构建反向 CSR（gather 模式用） ============
+    // 按 dst 排序，然后构建反向 ptr+src
+    std::vector<std::pair<uint32_t, uint32_t>> rev_edges;
+    rev_edges.reserve(nc);
+    for (size_t i = 0; i < nc; ++i)
+        rev_edges.emplace_back(g_skip_dst[i], edges[i].first);  // (dst, src)
+
+    std::sort(rev_edges.begin(), rev_edges.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    g_rev_skip_ptr.assign(N + 1, 0);
+    g_rev_skip_src.resize(nc);
+
+    size_t re = 0;
+    for (uint32_t idx = 0; idx < N; ++idx) {
+        g_rev_skip_ptr[idx] = static_cast<uint32_t>(re);
+        while (re < nc && rev_edges[re].first == idx) {
+            g_rev_skip_src[re] = rev_edges[re].second;
+            ++re;
+        }
+    }
+    g_rev_skip_ptr[N] = static_cast<uint32_t>(nc);
+}
+
 void init_propagation()
 {
-    g_prop_weight.resize(N, 0.0f);
-    g_incoming.resize(N, 0.0f);
+    static bool once = false;
+
+    // 工作区分配（幂等，可重复调用）
+    g_prop_weight.resize(N);
+    g_incoming.resize(N);
+    build_coord_tables();
+
+    if (once) return;
+    once = true;
 
     g_skip_ptr.assign(N + 1, 0);
     g_skip_dst.clear();
     g_skip_weight.clear();
     g_skip_grad.clear();
-
-    static bool once = false;
-    if (once) return;
-    once = true;
+    g_rev_skip_ptr.clear();
+    g_rev_skip_src.clear();
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    float scale = 1.0f / g_num_neighbors;
+    // 中性初始化：不放大也不衰减，平衡 decay 的损失
+    float scale = (1.0f - g_time_decay) / static_cast<float>(g_num_neighbors);
     std::uniform_real_distribution<float> dist(-scale, scale);
     for (auto& w : g_prop_weight) w = dist(gen);
 
-    // ============ 生成随机长程跳跃连接 ============
-    if (g_skip_density > 0.0f) {
-        std::vector<std::pair<uint32_t, uint32_t>> edges;
-        std::uniform_real_distribution<float> prob_dist(0.0f, 1.0f);
-        std::uniform_int_distribution<int> coord_dist(0, static_cast<int>(network_x - 1));
-
-        for (uint32_t idx = 0; idx < N; ++idx) {
-            if (prob_dist(gen) >= g_skip_density) continue;
-
-            // 随机选择一个「远处」目标（排斥自身及 26 邻域）
-            for (int attempt = 0; attempt < 20; ++attempt) {
-                uint32_t tx = static_cast<uint32_t>(coord_dist(gen));
-                uint32_t ty = static_cast<uint32_t>(coord_dist(gen));
-                uint32_t tz = static_cast<uint32_t>(coord_dist(gen));
-                uint32_t target = tx * network_y * network_z
-                                + ty * network_z + tz;
-                if (!is_too_close(idx, target)) {
-                    edges.emplace_back(idx, target);
-                    break;
-                }
-            }
-        }
-
-        // 按 src 排序，构建 CSR
-        std::sort(edges.begin(), edges.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
-
-        size_t nc = edges.size();
-        g_skip_dst.resize(nc);
-        g_skip_weight.resize(nc);
-        for (size_t i = 0; i < nc; ++i)
-            g_skip_dst[i] = edges[i].second;
-
-        // 权重初始化：与本地传播相同的量级
-        for (auto& w : g_skip_weight) w = dist(gen);
-
-        // 构建 ptr
-        size_t e = 0;
-        for (uint32_t idx = 0; idx < N; ++idx) {
-            g_skip_ptr[idx] = static_cast<uint32_t>(e);
-            while (e < nc && edges[e].first == idx) ++e;
-        }
-        g_skip_ptr[N] = static_cast<uint32_t>(nc);
-
-        g_skip_grad.resize(nc, 0.0f);
-
-        std::cout << "Skip connections generated: " << nc
-                  << " (density=" << (g_skip_density * 100.0f) << "%)" << std::endl;
-    }
+    // 跳跃连接用更大的初始化：等效约 5 个邻居的信号量级，弥补单条边无叠加 buff
+    float skip_scale = scale * 5.0f;
+    std::uniform_real_distribution<float> skip_dist(-skip_scale, skip_scale);
+    build_skip_connections(gen, skip_dist);
 }
 
-void propagate_step(float* network, float* incoming)
+void propagate_step(float* network, float* incoming, float* act_tanh)
 {
+    // 确保有激活值缓冲区：如果外部提供了就用外部，否则用内部的
+    static std::vector<float> s_act_work;
+    float* act = act_tanh;
+    if (!act) {
+        s_act_work.resize(N);
+        act = s_act_work.data();
+    }
+
     // Phase 1: 衰减 + 接收（每细胞独立，安全并行）
     #pragma omp parallel for
     for (int idx = 0; idx < static_cast<int>(N); ++idx) {
-        float a = network[idx];
-        network[idx] = a * g_time_decay + incoming[idx];
+        float v = network[idx];
+        network[idx] = v * g_time_decay + incoming[idx];
         incoming[idx] = 0.0f;
     }
 
-    // Phase 2: 发送（使用原子操作避免竞争）
+    // Phase 2: 计算 tanh 激活值（全部读出，无竞争）
     #pragma omp parallel for
     for (int idx = 0; idx < static_cast<int>(N); ++idx) {
-        size_t x = static_cast<size_t>(idx) / (network_y * network_z);
-        size_t yz = static_cast<size_t>(idx) % (network_y * network_z);
-        size_t y = yz / network_z;
-        size_t z = yz % network_z;
-        float a = std::tanh(network[idx] * 0.5f) * 2.0f;  // ← 宽松夹住
+        act[idx] = std::tanh(network[idx] * 0.5f);
+    }
 
-        // ---- 本地 26 邻域发送 ----
-        float w = g_prop_weight[idx];
-        if (a != 0.0f && w != 0.0f) {
-            float sig = a * w;
-            for (size_t n = 0; n < g_num_neighbors; ++n) {
-                int nx = static_cast<int>(x) + g_neighbors_26[n].dx;
-                int ny = static_cast<int>(y) + g_neighbors_26[n].dy;
-                int nz = static_cast<int>(z) + g_neighbors_26[n].dz;
-                if (nx >= 0 && nx < static_cast<int>(network_x) &&
-                    ny >= 0 && ny < static_cast<int>(network_y) &&
-                    nz >= 0 && nz < static_cast<int>(network_z)) {
-                    size_t ni = static_cast<size_t>(nx) * network_y * network_z
-                              + static_cast<size_t>(ny) * network_z
-                              + static_cast<size_t>(nz);
-                    #pragma omp atomic
-                    incoming[ni] += sig;
-                }
+    // Phase 3: gather 模式 — 每个细胞从 26 邻域邻居读取激活值
+    // 不需要原子操作：每个细胞只写自己的 incoming[idx]
+    #pragma omp parallel for
+    for (int idx = 0; idx < static_cast<int>(N); ++idx) {
+        int x = static_cast<int>(g_cell_x[idx]);
+        int y = static_cast<int>(g_cell_y[idx]);
+        int z = static_cast<int>(g_cell_z[idx]);
+        float sum = 0.0f;
+        for (size_t n = 0; n < g_num_neighbors; ++n) {
+            int nx = x + g_neighbors_26[n].dx;
+            int ny = y + g_neighbors_26[n].dy;
+            int nz = z + g_neighbors_26[n].dz;
+            if (nx >= 0 && nx < static_cast<int>(network_x) &&
+                ny >= 0 && ny < static_cast<int>(network_y) &&
+                nz >= 0 && nz < static_cast<int>(network_z)) {
+                size_t ni = static_cast<size_t>(nx) * network_y * network_z
+                          + static_cast<size_t>(ny) * network_z
+                          + static_cast<size_t>(nz);
+                sum += act[ni] * 2.0f * g_prop_weight[ni];
             }
         }
+        incoming[idx] += sum;
+    }
 
-        // ---- 长程跳跃连接发送 ----
-        if (a != 0.0f) {
-            for (uint32_t e = g_skip_ptr[idx]; e < g_skip_ptr[idx + 1]; ++e) {
-                float ws = g_skip_weight[e];
-                if (ws == 0.0f) continue;
-                #pragma omp atomic
-                incoming[g_skip_dst[e]] += a * ws;
+    // Phase 4: gather 模式 — 长程跳跃连接（使用反向 CSR）
+    if (!g_rev_skip_ptr.empty()) {
+        #pragma omp parallel for
+        for (int idx = 0; idx < static_cast<int>(N); ++idx) {
+            float sum = 0.0f;
+            for (uint32_t e = g_rev_skip_ptr[idx]; e < g_rev_skip_ptr[idx + 1]; ++e) {
+                uint32_t src = g_rev_skip_src[e];
+                sum += act[src] * 2.0f * g_skip_weight[e];
             }
+            incoming[idx] += sum;
         }
     }
 }
