@@ -1,6 +1,7 @@
 # 编译产物
 train.exe
 tmp/
+build_gpu/
 
 # 训练权重
 output/
