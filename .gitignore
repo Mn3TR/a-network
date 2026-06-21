@@ -20,7 +20,10 @@ reasonix.toml
 Thumbs.db
 .DS_Store
 
-# IDE
+# Windows 保留设备名
+nul
+NUL
+Nul
 .vscode/
 
 # 旧备份
