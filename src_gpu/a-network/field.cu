@@ -14,7 +14,8 @@ const NeighborOffset g_neighbors_26[] = {
 const int g_num_neighbors = 26;
 
 // ============ 设备指针 ============
-float*       d_network      = nullptr;
+float*       d_field        = nullptr;  // 场状态（前向用）
+float*       d_network      = nullptr;  // 梯度缓冲（反向用）
 float*       d_incoming     = nullptr;
 float*       d_act          = nullptr;
 float*       d_prop_weight  = nullptr;
@@ -193,10 +194,11 @@ __global__ void backward_gather_kernel(
 
 void gpu_init_field()
 {
-    size_t bytes  = N * sizeof(float);
+    size_t bytes = N * sizeof(float);
 
-    CUDA_CHECK(cudaMalloc(&d_network,      bytes));
-    CUDA_CHECK(cudaMalloc(&d_incoming,     bytes));
+    CUDA_CHECK(cudaMalloc(&d_field,       bytes));
+    CUDA_CHECK(cudaMalloc(&d_network,     bytes));
+    CUDA_CHECK(cudaMalloc(&d_incoming,    bytes));
     CUDA_CHECK(cudaMalloc(&d_act,          bytes));
     CUDA_CHECK(cudaMalloc(&d_prop_weight,  bytes));
     CUDA_CHECK(cudaMalloc(&d_prop_grad,    bytes));
@@ -223,6 +225,7 @@ void gpu_free_field()
         }
         cudaFree(d_act_buf);
     }
+    cudaFree(d_field);        d_field        = nullptr;
     cudaFree(d_network);      d_network      = nullptr;
     cudaFree(d_incoming);     d_incoming     = nullptr;
     cudaFree(d_act);          d_act          = nullptr;
@@ -293,6 +296,11 @@ void gpu_clear_gradients()
         CUDA_CHECK(cudaMemset(d_skip_grad, 0, gpu_num_edges * sizeof(float)));
 }
 
+void gpu_zero_field()
+{
+    CUDA_CHECK(cudaMemset(d_field, 0, N * sizeof(float)));
+}
+
 void gpu_zero_network()
 {
     CUDA_CHECK(cudaMemset(d_network, 0, N * sizeof(float)));
@@ -314,7 +322,7 @@ void gpu_forward_propagate()
         float* slot;
         cudaMemcpy(&slot, d_act_buf + s, sizeof(float*), cudaMemcpyDeviceToHost);
 
-        decay_kernel<<<grid, block>>>(d_network, d_incoming, slot);
+        decay_kernel<<<grid, block>>>(d_field, d_incoming, slot);
         CUDA_CHECK(cudaGetLastError());
 
         gather_kernel<<<grid, block>>>(

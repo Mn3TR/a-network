@@ -11,6 +11,7 @@ nvcc -std=c++20 -O3 \
      -I"$SRC" -I"$CPU_SRC" \
      "$SRC/app/train.cu" \
      "$SRC/a-network/field.cu" \
+     "$SRC/a-network/model.cu" \
      "$CPU_SRC/a-network/convert.cpp" \
      "$CPU_SRC/a-network/field.cpp" \
      "$CPU_SRC/a-network/readout.cpp" \

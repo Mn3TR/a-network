@@ -21,7 +21,8 @@ extern const NeighborOffset g_neighbors_26[26];
 extern const int g_num_neighbors;
 
 // 设备指针
-extern float*       d_network;
+extern float*       d_field;       // [N] — 场状态（前向用，与 d_network 分离）
+extern float*       d_network;     // [N] — 梯度缓冲（反向用）
 extern float*       d_incoming;
 extern float*       d_act;
 extern float*       d_prop_weight;
@@ -50,6 +51,7 @@ void gpu_upload_skip_csr(const uint32_t* rev_skip_ptr,
                          const float* skip_weight, uint32_t num_edges);
 
 void gpu_zero_network();
+void gpu_zero_field();
 void gpu_zero_incoming();
 void gpu_clear_gradients();
 
