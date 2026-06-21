@@ -1,5 +1,4 @@
 #!/bin/bash
-# A-Network CUDA 构建脚本
 set -e
 
 SRC=src_gpu
