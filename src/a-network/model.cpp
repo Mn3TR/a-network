@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
-#include <random>
 
 void init_all()
 {
@@ -68,80 +67,39 @@ static void backward_readout_h(const float* d_h, float* d_network)
         g_out_bias_grad[n] -= d_network[n];
 }
 
-// ============ 采样 Softmax + Loss ============
-// 只算 target + g_num_negatives 个随机负样本，避免全词表 128256 的 O(VH) 计算
-static float sampled_softmax_loss(const float* h, size_t target_id, float* d_h)
+// ============ 全词表 Softmax + Loss ============
+static float lm_head_loss(const float* h, size_t target_id, float* d_h)
 {
     size_t H = g_hidden_dim, V = g_vocab_size;
-    size_t K = g_num_negatives;
-    size_t C = K + 1;  // target + negatives
+    static std::vector<float> logits, d_logits;
+    logits.resize(V);
+    d_logits.resize(V);
 
-    // RNG + 负样本候选集
-    static std::mt19937 s_rng(std::random_device{}());
-    static std::uniform_int_distribution<size_t> s_sampler(0, V - 1);
-
-    static std::vector<size_t> candidates;
-    candidates.resize(C);
-    candidates[0] = target_id;
-    for (size_t i = 1; i < C; ++i) {
-        size_t neg;
-        do { neg = s_sampler(s_rng); } while (neg == target_id);
-        candidates[i] = neg;
-    }
-
-    // 只用候选集算 logits
-    static std::vector<float> logits;
-    logits.resize(C);
     #pragma omp parallel for
-    for (int ci = 0; ci < static_cast<int>(C); ++ci) {
-        const float* row = g_embed_weight.data() + candidates[ci] * H;
+    for (int t = 0; t < static_cast<int>(V); ++t) {
         float sum = 0.0f;
+        const float* row = g_embed_weight.data() + static_cast<size_t>(t) * H;
         for (size_t k = 0; k < H; ++k) sum += row[k] * h[k];
-        logits[ci] = sum;
+        logits[static_cast<size_t>(t)] = sum;
     }
 
-    // Softmax（max-subtraction 防溢出）
-    float max_val = logits[0];
-    for (size_t i = 1; i < C; ++i)
-        if (logits[i] > max_val) max_val = logits[i];
+    float loss = cross_entropy_loss(logits.data(), target_id, d_logits.data());
 
-    static std::vector<float> probs;
-    probs.resize(C);
-    float sum_exp = 0.0f;
-    for (size_t i = 0; i < C; ++i) {
-        float e = std::exp(logits[i] - max_val);
-        probs[i] = e;
-        sum_exp += e;
-    }
-    float inv_sum = 1.0f / sum_exp;
-    for (size_t i = 0; i < C; ++i)
-        probs[i] *= inv_sum;
-
-    // Loss = -log(prob[target])
-    float loss = -std::log(probs[0] + 1e-30f);
-
-    // d_h 反向：d_h[k] = Σ_t d_logits[t] · embed[t][k]
     #pragma omp parallel for
     for (int k = 0; k < static_cast<int>(H); ++k) {
         float sum = 0.0f;
-        size_t uk = static_cast<size_t>(k);
-        for (size_t ci = 0; ci < C; ++ci) {
-            const float* row = g_embed_weight.data() + candidates[ci] * H;
-            float d = probs[ci] - (ci == 0 ? 1.0f : 0.0f);
-            sum += d * row[uk];
-        }
-        d_h[uk] = sum;
+        for (size_t t = 0; t < V; ++t)
+            sum += d_logits[t] * g_embed_weight[t * H + static_cast<size_t>(k)];
+        d_h[static_cast<size_t>(k)] = sum;
     }
 
-    // Embedding 梯度（只对候选集内的 token 累加）
-    for (size_t ci = 0; ci < C; ++ci) {
-        float d = probs[ci] - (ci == 0 ? 1.0f : 0.0f);
-        if (d == 0.0f) continue;
-        float* row = g_embed_grad.data() + candidates[ci] * H;
-        for (size_t k = 0; k < H; ++k)
-            row[k] += d * h[k];
+    #pragma omp parallel for
+    for (int t = 0; t < static_cast<int>(V); ++t) {
+        float dv = d_logits[t];
+        if (dv == 0.0f) continue;
+        float* row = g_embed_grad.data() + static_cast<size_t>(t) * H;
+        for (size_t k = 0; k < H; ++k) row[k] += dv * h[k];
     }
-
     return loss;
 }
 
@@ -167,7 +125,7 @@ float train_token(size_t input_id, size_t target_id,
     static std::vector<float> d_h_cur;
     d_h_cur.assign(H, 0.0f);
     readout_h(flat_net, h_cur.data());
-    float loss = sampled_softmax_loss(h_cur.data(), target_id, d_h_cur.data());
+    float loss = lm_head_loss(h_cur.data(), target_id, d_h_cur.data());
 
     // ---- 反向 ----
 

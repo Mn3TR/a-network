@@ -4,7 +4,7 @@
 // ============ 训练超参数 ============
 
 // 每 token 注入后的传播步数
-constexpr size_t g_prop_steps = 8;
+constexpr size_t g_prop_steps = 20;
 
 // 梯度累积步数（累积多少步再更新一次权重）
 constexpr size_t g_grad_accum = 4;

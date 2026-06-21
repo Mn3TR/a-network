@@ -56,36 +56,36 @@ h1 { font-size: 18px; margin-bottom: 12px; color: #aad; }
 <div class="viewer-grid">
     <div class="view-panel">
         <div class="label">XY 平面 (z 切片)</div>
-        <canvas id="cv-xy" width="320" height="320"></canvas>
+        <canvas id="cv-xy" width="400" height="400"></canvas>
     </div>
     <div class="view-panel">
         <div class="label">XZ 平面 (y 切片)</div>
-        <canvas id="cv-xz" width="320" height="320"></canvas>
+        <canvas id="cv-xz" width="400" height="400"></canvas>
     </div>
     <div class="view-panel">
         <div class="label">YZ 平面 (x 切片)</div>
-        <canvas id="cv-yz" width="320" height="320"></canvas>
+        <canvas id="cv-yz" width="400" height="400"></canvas>
     </div>
 </div>
 
 <div id="crosshair-info">鼠标悬停在任一视图上查看数值</div>
 
 <div id="slider-row">
-    <span id="slice-label">切片 z = 32</span>
-    <input type="range" id="slice-slider" min="0" max="63" value="32">
-    <span id="slice-pos">32 / 63</span>
+    <span id="slice-label">切片 z = <span id="slice-val">40</span></span>
+    <input type="range" id="slice-slider" min="0" max="79" value="40">
+    <span id="slice-pos">40 / 79</span>
 </div>
 
 <div id="file-list" class="file-list"></div>
 
 <script>
-const SZ = 64;
-const CANVAS_SIZE = 320;
+const SZ = 80;
+const CANVAS_SIZE = 400;
 const CELL = CANVAS_SIZE / SZ; // 5
 
 let files = [];        // { name, epoch, step, data: Float32Array }
 let currentIdx = -1;
-let currentSlice = 32; // z index for XY view
+let currentSlice = Math.floor(SZ / 2);
 
 const xyCanvas = document.getElementById('cv-xy');
 const xzCanvas = document.getElementById('cv-xz');
@@ -140,7 +140,7 @@ function selectFile(idx) {
     if (idx < 0 || idx >= files.length) return;
     currentIdx = idx;
     const f = files[idx];
-    infoDiv.textContent = `📄 ${f.name}  |  epoch ${f.epoch}  |  step ${f.step}  |  64 × 64 × 64`;
+    infoDiv.textContent = `📄 ${f.name}  |  epoch ${f.epoch}  |  step ${f.step}  |  ${SZ} × ${SZ} × ${SZ}`;
     updateFileList();
     renderAll();
 }
@@ -216,7 +216,7 @@ function renderAll() {
     renderView(xzCtx, field, 'y', y);
     renderView(yzCtx, field, 'x', x);
     sliceLabel.textContent = `切片 z = ${z}`;
-    slicePos.textContent = `${z} / 63`;
+    slicePos.textContent = `${z} / ${SZ - 1}`;
     crosshairInfo.textContent = '鼠标悬停在任一视图上查看数值';
 }
 
@@ -267,7 +267,7 @@ sliceSlider.oninput = function() {
 document.addEventListener('wheel', function(e) {
     if (currentIdx < 0) return;
     const delta = e.deltaY > 0 ? 1 : -1;
-    currentSlice = Math.max(0, Math.min(63, currentSlice + delta));
+    currentSlice = Math.max(0, Math.min(SZ - 1, currentSlice + delta));
     sliceSlider.value = currentSlice;
     renderAll();
 }, { passive: true });
@@ -285,7 +285,7 @@ document.addEventListener('keydown', function(e) {
         renderAll();
         e.preventDefault();
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-        currentSlice = Math.min(63, currentSlice + 1);
+        currentSlice = Math.min(SZ - 1, currentSlice + 1);
         sliceSlider.value = currentSlice;
         renderAll();
         e.preventDefault();
