@@ -161,15 +161,13 @@ void init_propagation()
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    // 中性初始化：不放大也不衰减，平衡 decay 的损失
-    float scale = (1.0f - g_time_decay) / static_cast<float>(g_num_neighbors);
+    // 原版初始化：1/26 ≈ 0.0385，使信号进入 tanh 饱和区产生非线性竞争
+    float scale = 1.0f / static_cast<float>(g_num_neighbors);
     std::uniform_real_distribution<float> dist(-scale, scale);
     for (auto& w : g_prop_weight) w = dist(gen);
 
-    // 跳跃连接用更大的初始化：等效约 5 个邻居的信号量级，弥补单条边无叠加 buff
-    float skip_scale = scale * 5.0f;
-    std::uniform_real_distribution<float> skip_dist(-skip_scale, skip_scale);
-    build_skip_connections(gen, skip_dist);
+    // 跳跃连接同量级初始化
+    build_skip_connections(gen, dist);
 }
 
 void propagate_step(float* network, float* incoming, float* act_tanh)
@@ -196,40 +194,41 @@ void propagate_step(float* network, float* incoming, float* act_tanh)
         act[idx] = std::tanh(network[idx] * 0.5f);
     }
 
-    // Phase 3: gather 模式 — 每个细胞从 26 邻域邻居读取激活值
-    // 不需要原子操作：每个细胞只写自己的 incoming[idx]
+    // Phase 3: scatter 模式 — 每个细胞广播激活值×权重到 26 邻域 + 跳跃连接
+    // 使用原子操作避免写竞争（原版 scatter 语义，产生几何分化）
     #pragma omp parallel for
     for (int idx = 0; idx < static_cast<int>(N); ++idx) {
         int x = static_cast<int>(g_cell_x[idx]);
         int y = static_cast<int>(g_cell_y[idx]);
         int z = static_cast<int>(g_cell_z[idx]);
-        float sum = 0.0f;
-        for (size_t n = 0; n < g_num_neighbors; ++n) {
-            int nx = x + g_neighbors_26[n].dx;
-            int ny = y + g_neighbors_26[n].dy;
-            int nz = z + g_neighbors_26[n].dz;
-            if (nx >= 0 && nx < static_cast<int>(network_x) &&
-                ny >= 0 && ny < static_cast<int>(network_y) &&
-                nz >= 0 && nz < static_cast<int>(network_z)) {
-                size_t ni = static_cast<size_t>(nx) * network_y * network_z
-                          + static_cast<size_t>(ny) * network_z
-                          + static_cast<size_t>(nz);
-                sum += act[ni] * 2.0f * g_prop_weight[ni];
+        float a = act[idx] * 2.0f;
+        float w = g_prop_weight[idx];
+
+        // 本地 26 邻域发送
+        if (a != 0.0f && w != 0.0f) {
+            float sig = a * w;
+            for (size_t n = 0; n < g_num_neighbors; ++n) {
+                int nx = x + g_neighbors_26[n].dx;
+                int ny = y + g_neighbors_26[n].dy;
+                int nz = z + g_neighbors_26[n].dz;
+                if (nx >= 0 && nx < static_cast<int>(network_x) &&
+                    ny >= 0 && ny < static_cast<int>(network_y) &&
+                    nz >= 0 && nz < static_cast<int>(network_z)) {
+                    size_t ni = static_cast<size_t>(nx) * network_y * network_z
+                              + static_cast<size_t>(ny) * network_z
+                              + static_cast<size_t>(nz);
+                    #pragma omp atomic
+                    incoming[ni] += sig;
+                }
             }
         }
-        incoming[idx] += sum;
-    }
 
-    // Phase 4: gather 模式 — 长程跳跃连接（使用反向 CSR）
-    if (!g_rev_skip_ptr.empty()) {
-        #pragma omp parallel for
-        for (int idx = 0; idx < static_cast<int>(N); ++idx) {
-            float sum = 0.0f;
-            for (uint32_t e = g_rev_skip_ptr[idx]; e < g_rev_skip_ptr[idx + 1]; ++e) {
-                uint32_t src = g_rev_skip_src[e];
-                sum += act[src] * 2.0f * g_skip_weight[e];
+        // 长程跳跃连接发送
+        if (a != 0.0f) {
+            for (uint32_t e = g_skip_ptr[idx]; e < g_skip_ptr[idx + 1]; ++e) {
+                #pragma omp atomic
+                incoming[g_skip_dst[e]] += a * g_skip_weight[e];
             }
-            incoming[idx] += sum;
         }
     }
 }
