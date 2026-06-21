@@ -180,17 +180,13 @@ void propagate_step(float* network, float* incoming, float* act_tanh)
         act = s_act_work.data();
     }
 
-    // Phase 1: 衰减 + 接收（每细胞独立，安全并行）
+    // Phase 1+2 合并:衰减、接收 incoming、清零 incoming、计算激活
+    // 均为逐元素无依赖,合并成单个 parallel region 省一次 barrier
     #pragma omp parallel for
     for (int idx = 0; idx < static_cast<int>(N); ++idx) {
         float v = network[idx];
         network[idx] = v * g_time_decay + incoming[idx];
         incoming[idx] = 0.0f;
-    }
-
-    // Phase 2: 计算 tanh 激活值（全部读出，无竞争）
-    #pragma omp parallel for
-    for (int idx = 0; idx < static_cast<int>(N); ++idx) {
         act[idx] = std::tanh(network[idx] * 0.5f);
     }
 
