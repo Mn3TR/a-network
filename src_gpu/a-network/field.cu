@@ -35,16 +35,7 @@ __constant__ NeighborOffset c_neighbors_26[26];
 constexpr int BW = 8, BH = 8, BD = 8;   // 计算块大小
 constexpr int SW = BW + 2, SH = BH + 2, SD = BD + 2;  // 片元大小
 
-#define CUDA_CHECK(call) do {                                         \
-    cudaError_t err = call;                                           \
-    if (err != cudaSuccess) {                                         \
-        fprintf(stderr, "CUDA error %d at %s:%d: %s\n",              \
-                err, __FILE__, __LINE__, cudaGetErrorString(err));    \
-        exit(1);                                                      \
-    }                                                                 \
-} while(0)
-
-// ============ Kernel 1: 衰减 + 接收 + tanh（逐元素，无共享内存需要） ============
+// ============ Kernel 1: 衰减 + 接收 + tanh ============
 __global__ void decay_kernel(float* network, float* incoming, float* act)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;

@@ -1,5 +1,17 @@
 #pragma once
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+// ============ CUDA 错误检查宏 ============
+#define CUDA_CHECK(call) do {                                         \
+    cudaError_t err = call;                                           \
+    if (err != cudaSuccess) {                                         \
+        fprintf(stderr, "CUDA error %d at %s:%d: %s\n",              \
+                err, __FILE__, __LINE__, cudaGetErrorString(err));    \
+        exit(1);                                                      \
+    }                                                                 \
+} while(0)
 
 // ============ 网络维度 ============
 constexpr int NET_X = 80;
