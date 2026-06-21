@@ -32,3 +32,6 @@ srcback.zip
 
 # 场可视化输出
 1/
+
+# zip 压缩包
+*.zip
