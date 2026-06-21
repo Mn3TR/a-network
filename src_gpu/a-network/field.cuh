@@ -12,7 +12,7 @@ struct NeighborOffset { int dx, dy, dz; };
 extern const NeighborOffset g_neighbors_26[26];
 extern const int g_num_neighbors;
 
-// ============ 设备内存 ============
+// ============ 设备指针 ============
 extern float*       d_network;
 extern float*       d_incoming;
 extern float*       d_act;
@@ -24,13 +24,16 @@ extern float*       d_skip_weight;    // [num_edges]
 // ============ 初始化 / 清理 ============
 void gpu_init_field();
 void gpu_free_field();
+
+// 数据上传 / 下载（仅在需要时调用）
+void gpu_upload_network(const float* cpu_network);
+void gpu_download_network(float* cpu_network);
 void gpu_upload_prop_weights(const float* cpu_prop_weight);
 void gpu_upload_skip_csr(const uint32_t* rev_skip_ptr,
                          const uint32_t* rev_skip_src,
                          const float* skip_weight,
                          uint32_t num_edges);
 
-// ============ 传播 ============
-void gpu_propagate_step(float* host_network  = nullptr,
-                         float* host_incoming = nullptr,
-                         float* host_act      = nullptr);
+// ============ 传播（无 PCIe 开销，数据始终驻留 GPU） ============
+void gpu_propagate_step_device();    // 异步 launch
+void gpu_propagate_step_sync();      // 同步等待完成
