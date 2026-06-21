@@ -1,147 +1,201 @@
-#include "../a-network/field.cuh"
+#include "field.cuh"
+#include "../core/config.h"
 #include <cstdio>
 #include <cmath>
 #include <chrono>
+#include <string>
 #include <vector>
+#include <ctime>
 
-// ============ CPU 参考实现 ============
-static float cpu_time_decay = 0.9f;
+// CPU 组件
+#include "../../src/core/types.h"
+#include "../../src/core/config.h"
+#include "../../src/a-network/convert.h"
+#include "../../src/a-network/field.h"
+#include "../../src/a-network/model.h"
+#include "../../src/a-network/readout.h"
+#include "../../src/a-network/backward.h"
+#include "../../src/tokenizer/bpe.h"
+#include "../../src/train/optimizer.h"
+#include "../../src/io/data.h"
+#include "../../src/io/progress.h"
+#include "../../src/io/checkpoint.h"
 
-static void cpu_propagate_step(
-    float* network, float* incoming,
-    const float* prop_weight,
-    const uint32_t* rev_skip_ptr,
-    const uint32_t* rev_skip_src,
-    const float* skip_weight)
+// ============ GPU 加速的 train_token ============
+// CPU: 注入 → 上传 → GPU: 前向 20 步 → 下载 → CPU: 读出+Loss
+// CPU: 反向读出 → 上传 → GPU: 反向 20 步 → 下载 → CPU: 反向注入
+static float gpu_train_token(size_t input_id, size_t target_id,
+                              float* flat_net, float* incoming_buf)
 {
-    for (int idx = 0; idx < N; ++idx) {
-        float v = network[idx] * cpu_time_decay + incoming[idx];
-        network[idx] = v;
-        incoming[idx] = 0.0f;
-    }
+    size_t H = g_hidden_dim;
 
-    std::vector<float> act(N);
-    for (int i = 0; i < N; ++i) act[i] = tanhf(network[i] * 0.5f);
+    // ---- 1. CPU 注入 ----
+    const float* emb = g_embed_weight.data() + input_id * H;
+    tokens_to_field(emb, 1, flat_net);
 
-    for (int idx = 0; idx < N; ++idx) {
-        int x = idx / (NET_Y * NET_Z);
-        int yz = idx % (NET_Y * NET_Z);
-        int y = yz / NET_Z;
-        int z = yz % NET_Z;
+    // ---- 2. 上传 → GPU 前向传播 ----
+    CUDA_CHECK(cudaMemcpy(d_network,  flat_net,    N * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_incoming, incoming_buf, N * sizeof(float), cudaMemcpyHostToDevice));
+    gpu_forward_propagate();
+    CUDA_CHECK(cudaMemcpy(flat_net, d_network, N * sizeof(float), cudaMemcpyDeviceToHost));
 
+    // ---- 3. CPU 读出 ----
+    for (size_t n = 0; n < N; ++n) g_diff[n] = flat_net[n] - g_out_bias[n];
+    std::vector<float> h_cur(H);
+    for (size_t k = 0; k < H; ++k) {
         float sum = 0.0f;
-        for (int n = 0; n < 26; ++n) {
-            int nx = x + g_neighbors_26[n].dx;
-            int ny = y + g_neighbors_26[n].dy;
-            int nz = z + g_neighbors_26[n].dz;
-            if (nx >= 0 && nx < NET_X &&
-                ny >= 0 && ny < NET_Y &&
-                nz >= 0 && nz < NET_Z) {
-                int ni = nz * NET_Y * NET_X + ny * NET_X + nx;
-                sum += act[ni] * 2.0f * prop_weight[ni];
-            }
-        }
-        for (uint32_t e = rev_skip_ptr[idx]; e < rev_skip_ptr[idx + 1]; ++e) {
-            uint32_t src = rev_skip_src[e];
-            sum += act[src] * 2.0f * skip_weight[e];
-        }
-        incoming[idx] += sum;
+        for (size_t n = 0; n < N; ++n) sum += g_out_weight[k * N + n] * g_diff[n];
+        h_cur[k] = sum;
     }
+
+    // ---- 4. CPU LM Head + Loss ----
+    std::vector<float> logits(g_vocab_size);
+    std::vector<float> d_logits(g_vocab_size);
+    for (size_t t = 0; t < g_vocab_size; ++t) {
+        float sum = 0.0f;
+        for (size_t k = 0; k < H; ++k) sum += g_embed_weight[t * H + k] * h_cur[k];
+        logits[t] = sum;
+    }
+    float loss = cross_entropy_loss(logits.data(), target_id, d_logits.data());
+
+    // ---- 5. CPU 反向读出 ----
+    std::vector<float> d_h(H, 0.0f);
+    for (size_t k = 0; k < H; ++k)
+        for (size_t t = 0; t < g_vocab_size; ++t)
+            d_h[k] += d_logits[t] * g_embed_weight[t * H + k];
+
+    // embed grad
+    for (size_t t = 0; t < g_vocab_size; ++t) {
+        float dv = d_logits[t];
+        if (dv == 0.0f) continue;
+        for (size_t k = 0; k < H; ++k)
+            g_embed_grad[t * H + k] += dv * h_cur[k];
+    }
+
+    // W_out, b_out grad
+    static std::vector<float> d_net(N);
+    for (size_t n = 0; n < N; ++n) {
+        float sum = 0.0f;
+        for (size_t k = 0; k < H; ++k) sum += d_h[k] * g_out_weight[k * N + n];
+        d_net[n] = sum;
+    }
+    for (size_t k = 0; k < H; ++k) {
+        float dhk = d_h[k];
+        if (dhk == 0.0f) continue;
+        for (size_t n = 0; n < N; ++n)
+            g_out_weight_grad[k * N + n] += dhk * g_diff[n];
+    }
+    for (size_t n = 0; n < N; ++n) g_out_bias_grad[n] -= d_net[n];
+
+    // ---- 6. 上传 → GPU 反向传播 ----
+    CUDA_CHECK(cudaMemcpy(d_network,  d_net.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+    gpu_backward_propagate();
+    CUDA_CHECK(cudaMemcpy(d_net.data(), d_network, N * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // ---- 7. CPU 反向注入 ----
+    static std::vector<float> d_emb;
+    d_emb.assign(H, 0.0f);
+    backward_inject(d_net.data(), 1, emb, d_emb.data());
+    for (size_t k = 0; k < H; ++k)
+        g_embed_grad[input_id * H + k] += d_emb[k];
+
+    return loss;
 }
 
-int main()
+// ============ 主函数 ============
+int main(int argc, char* argv[])
 {
-    printf("=== A-Network GPU Benchmark ===\n");
-    printf("Grid: %dx%dx%d = %d cells\n", NET_X, NET_Y, NET_Z, N);
+    printf("=== A-Network GPU Training ===\n");
 
-    int dev_count = 0;
-    cudaGetDeviceCount(&dev_count);
-    if (dev_count == 0) { fprintf(stderr, "No CUDA device!\n"); return 1; }
+    int dev = 0;
+    cudaGetDeviceCount(&dev);
+    if (!dev) { fprintf(stderr, "No CUDA device\n"); return 1; }
+    cudaDeviceProp p;
+    cudaGetDeviceProperties(&p, 0);
+    printf("GPU: %s  (%d SMs, %.1f GB)\n", p.name, p.multiProcessorCount, p.totalGlobalMem / 1e9f);
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    printf("GPU: %s  (SM %d.%d, %d SMs)\n",
-           prop.name, prop.major, prop.minor, prop.multiProcessorCount);
+    // ---- 初始化 ----
+    load_tokenizer(g_tokenizer_path);
+    bool load_mode = (argc > 1 && std::string(argv[1]) == "load");
+    if (load_mode) { load_weights(); }
+    else { init_convert_weights(); init_propagation(); init_readout_weights(); }
+    init_all();
+    g_optim.init();
 
-    // ====== 宿主数据 ======
-    std::vector<float> h_network(N, 0.0f);
-    std::vector<float> h_incoming(N, 0.0f);
-    std::vector<float> h_prop_weight(N);
-
-    srand(42);
-    for (int i = 0; i < N; ++i) {
-        h_network[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
-        h_prop_weight[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.01f;
-    }
-
-    // 随机跳跃连接（1024 条）
-    uint32_t num_edges = 1024;
-    std::vector<uint32_t> h_rev_skip_ptr(N + 1, 0);
-    std::vector<uint32_t> h_rev_skip_src(num_edges);
-    std::vector<float> h_skip_weight(num_edges);
-
-    for (uint32_t e = 0; e < num_edges; ++e) {
-        uint32_t dst = (uint32_t)((float)rand() / RAND_MAX * N);
-        uint32_t src = (uint32_t)((float)rand() / RAND_MAX * N);
-        h_rev_skip_src[e] = src;
-        h_skip_weight[e] = ((float)rand() / RAND_MAX - 0.5f) * 0.01f;
-        h_rev_skip_ptr[dst + 1]++;
-    }
-    for (uint32_t i = 0; i < N; ++i)
-        h_rev_skip_ptr[i + 1] += h_rev_skip_ptr[i];
-    printf("Skip edges: %u\n", num_edges);
-
-    std::vector<float> cpu_net = h_network;
-    std::vector<float> cpu_inc(N, 0.0f);
-
-    // ====== GPU 初始化 ======
+    // GPU
     gpu_init_field();
-    gpu_upload_prop_weights(h_prop_weight.data());
-    gpu_upload_skip_csr(h_rev_skip_ptr.data(), h_rev_skip_src.data(),
-                        h_skip_weight.data(), num_edges);
-    gpu_upload_network(h_network.data());
+    gpu_upload_prop_weights(g_prop_weight.data());
+    size_t num_skip = g_skip_ptr.empty() ? 0 : g_skip_ptr[N];
+    if (num_skip > 0)
+        gpu_upload_skip_csr(g_rev_skip_ptr.data(), g_rev_skip_src.data(),
+                            g_skip_weight.data(), (uint32_t)num_skip);
 
-    // ====== GPU 预热 ======
-    gpu_propagate_step_sync();
-    printf("Warmup done\n");
+    // 数据
+    DataLoader data;
+    data.load_dir(g_data_dir);
+    if (data.tokens.empty()) return 1;
+    auto& tokens = data.tokens;
+    printf("Tokens: %zu, Skip edges: %zu\n", tokens.size(), num_skip);
 
-    // ====== GPU 基准（纯设备端，无 PCIe 开销） ======
-    int steps = 20;
-    auto t0 = std::chrono::steady_clock::now();
-    for (int s = 0; s < steps; ++s)
-        gpu_propagate_step_device();          // 异步 launch（不阻塞）
-    CUDA_CHECK(cudaDeviceSynchronize());       // 等全部完成
-    auto t1 = std::chrono::steady_clock::now();
-
-    float gpu_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
-    printf("GPU: %d steps in %.2f ms  (%.3f ms/step)\n",
-           steps, gpu_ms, gpu_ms / steps);
-
-    // ====== CPU 基准 ======
-    t0 = std::chrono::steady_clock::now();
-    for (int s = 0; s < steps; ++s)
-        cpu_propagate_step(cpu_net.data(), cpu_inc.data(),
-                           h_prop_weight.data(),
-                           h_rev_skip_ptr.data(), h_rev_skip_src.data(),
-                           h_skip_weight.data());
-    t1 = std::chrono::steady_clock::now();
-    float cpu_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
-    printf("CPU: %d steps in %.2f ms  (%.3f ms/step)\n",
-           steps, cpu_ms, cpu_ms / steps);
-
-    printf("Speedup: %.1fx\n", cpu_ms / gpu_ms);
-
-    // ====== 正确性检查 ======
-    gpu_download_network(h_network.data());
-
-    double max_diff = 0.0, sum_diff = 0.0;
-    for (int i = 0; i < N; ++i) {
-        double d = fabs((double)h_network[i] - (double)cpu_net[i]);
-        if (d > max_diff) max_diff = d;
-        sum_diff += d;
+    // 时间戳
+    {
+        auto now = std::chrono::system_clock::now();
+        time_t tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm; localtime_r(&tt, &tm);
+        char buf[32]; strftime(buf, sizeof(buf), "%Y-%m-%d-%H%M", &tm);
+        std::string stamp(buf), od = "output_gpu/output-" + stamp + "/";
+        g_weights_path = od + "weights.bin";
+        system(("mkdir -p " + od).c_str());
+        printf("Output: %s\n", od.c_str());
     }
-    printf("Max diff: %e  Mean diff: %e\n", max_diff, sum_diff / N);
 
+    // ---- 训练 ----
+    std::vector<float> buffer(N, 0.0f), incoming(N, 0.0f);
+    ProgressBar pb;
+
+    for (int epoch = 0; epoch < g_max_epochs; ++epoch) {
+        lr_schedule(epoch, g_max_epochs);
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        std::fill(incoming.begin(), incoming.end(), 0.0f);
+
+        float total_loss = 0.0f;
+        int total_steps = 0;
+        auto ep_start = std::chrono::steady_clock::now();
+
+        pb.start_epoch(epoch, g_max_epochs, (int)tokens.size() - 1);
+
+        for (size_t t = 0; t + 1 < tokens.size(); ++t) {
+            float loss = gpu_train_token(tokens[t], tokens[t+1],
+                                          buffer.data(), incoming.data());
+            total_loss += loss;
+            ++total_steps;
+
+            if (total_steps % g_grad_accum == 0) {
+                gpu_download_gradients(g_prop_grad.data(), g_skip_grad.data(), (uint32_t)num_skip);
+                g_optim.step();
+                g_optim.zero_grad();
+                gpu_clear_gradients();
+            }
+            pb.step(loss);
+        }
+
+        if (total_steps % g_grad_accum != 0) {
+            gpu_download_gradients(g_prop_grad.data(), g_skip_grad.data(), (uint32_t)num_skip);
+            g_optim.step();
+            g_optim.zero_grad();
+            gpu_clear_gradients();
+        }
+
+        float avg = total_loss / total_steps;
+        pb.end_epoch(avg);
+        float es = std::chrono::duration<float>(std::chrono::steady_clock::now() - ep_start).count();
+        printf("  %.1fs  avg=%.4f  lr=%.6f\n", es, avg, g_optim.lr);
+
+        if (avg < g_min_loss) break;
+    }
+
+    save_weights();
     gpu_free_field();
+    printf("Done. Weights: %s\n", g_weights_path.c_str());
     return 0;
 }
