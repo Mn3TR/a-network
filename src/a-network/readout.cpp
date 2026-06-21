@@ -39,8 +39,7 @@ void init_readout_weights()
 float cross_entropy_loss(const float* logits, size_t target_id, float* d_logits)
 {
     float max_val = logits[0];
-    #pragma omp parallel for reduction(max:max_val)
-    for (int t = 0; t < static_cast<int>(g_vocab_size); ++t)
+    for (size_t t = 1; t < g_vocab_size; ++t)
         if (logits[t] > max_val) max_val = logits[t];
 
     float sum_exp = 0.0f;
@@ -52,13 +51,13 @@ float cross_entropy_loss(const float* logits, size_t target_id, float* d_logits)
     }
 
     float inv_sum = 1.0f / sum_exp;
-    // 纯并行归一化(reduction(+:loss) 无必要:仅 target 项贡献 loss)
-    #pragma omp parallel for
-    for (int t = 0; t < static_cast<int>(g_vocab_size); ++t)
+    float loss = 0.0f;
+    #pragma omp parallel for reduction(+:loss)
+    for (int t = 0; t < static_cast<int>(g_vocab_size); ++t) {
         d_logits[t] *= inv_sum;
-
-    // 串行处理 target:归一化后值已定
-    float loss = -std::log(d_logits[target_id] + 1e-30f);
-    d_logits[target_id] -= 1.0f;
+        if (static_cast<size_t>(t) == target_id)
+            loss = -std::log(d_logits[t] + 1e-30f);
+        d_logits[t] -= (static_cast<size_t>(t) == target_id ? 1.0f : 0.0f);
+    }
     return loss;
 }

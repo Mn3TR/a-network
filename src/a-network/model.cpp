@@ -121,9 +121,8 @@ float train_token(size_t input_id, size_t target_id,
         propagate_step(flat_net, incoming_buf, g_prop_act[s].data());
 
     // 3. 读 h → 采样 Softmax Loss
-    static thread_local std::vector<float> h_cur;
-    h_cur.assign(H, 0.0f);
-    static thread_local std::vector<float> d_h_cur;
+    std::vector<float> h_cur(H);
+    static std::vector<float> d_h_cur;
     d_h_cur.assign(H, 0.0f);
     readout_h(flat_net, h_cur.data());
     float loss = lm_head_loss(h_cur.data(), target_id, d_h_cur.data());
@@ -131,8 +130,8 @@ float train_token(size_t input_id, size_t target_id,
     // ---- 反向 ----
 
     // 1. backward_readout_h
-    static thread_local std::vector<float> d_network;
-    d_network.assign(N, 0.0f);
+    static std::vector<float> d_network;
+    d_network.resize(N);
     backward_readout_h(d_h_cur.data(), d_network.data());
 
     // 2. backward_propagate
@@ -141,7 +140,7 @@ float train_token(size_t input_id, size_t target_id,
         backward_propagate(d_network.data(), incoming_buf, g_prop_act[s].data());
 
     // 3. backward_inject
-    static thread_local std::vector<float> d_emb;
+    static std::vector<float> d_emb;
     d_emb.assign(H, 0.0f);
     backward_inject(d_network.data(), 1, emb, d_emb.data());
 
@@ -166,13 +165,11 @@ size_t generate_token(size_t input_id, float* flat_net, float* incoming_buf)
         propagate_step(flat_net, incoming_buf);
 
     // 3. 读 h
-    static thread_local std::vector<float> h_cur;
-    h_cur.assign(H, 0.0f);
+    std::vector<float> h_cur(H);
     readout_h(flat_net, h_cur.data());
 
     // 4. LM Head → logits
-    static thread_local std::vector<float> logits;
-    logits.assign(g_vocab_size, 0.0f);  // 复用,避免每步 512KB 堆分配
+    std::vector<float> logits(g_vocab_size);
     #pragma omp parallel for
     for (int t = 0; t < static_cast<int>(g_vocab_size); ++t) {
         float sum = 0.0f;

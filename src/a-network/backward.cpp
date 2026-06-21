@@ -24,29 +24,27 @@ void backward_inject(const float* d_network, size_t S,
     size_t chunk = N / S;
     float inv_sqrt_S = 1.0f / std::sqrt(static_cast<float>(S));
 
-    // 外层按 i 串行(为将来 S>1 留接口),内层并行
-    for (size_t i = 0; i < S; ++i) {
+    #pragma omp parallel for
+    for (int ii = 0; ii < static_cast<int>(S); ++ii) {
+        size_t i = static_cast<size_t>(ii);
         const float* h_i = hidden + i * H;
         float* d_h_i = d_hidden + i * H;
         size_t off = i * chunk;
 
-        // (1)(2) bias_grad + 外积 weight_grad:按 n 并行,每 (k,n) 独立无冲突
-        #pragma omp parallel for
-        for (int n = 0; n < static_cast<int>(chunk); ++n) {
-            float dn = d_network[off + n] * inv_sqrt_S;
-            g_in_bias_grad[off + n] += dn;
-            for (size_t k = 0; k < H; ++k) {
-                float hk = h_i[k];
-                if (hk != 0.0f)
-                    g_in_weight_grad[k * N + off + n] += hk * dn;
-            }
+        for (size_t n = 0; n < chunk; ++n)
+            g_in_bias_grad[off + n] += d_network[off + n] * inv_sqrt_S;
+
+        for (size_t k = 0; k < H; ++k) {
+            float hk = h_i[k];
+            if (hk == 0.0f) continue;
+            float* row = g_in_weight_grad.data() + k * N + off;
+            for (size_t n = 0; n < chunk; ++n)
+                row[n] += hk * d_network[off + n] * inv_sqrt_S;
         }
 
-        // (3) d_h 的 GEMV:按 k 并行(k 内部串行 sum over n,reduction over n)
-        #pragma omp parallel for
-        for (int k = 0; k < static_cast<int>(H); ++k) {
+        for (size_t k = 0; k < H; ++k) {
             float sum = 0.0f;
-            const float* row = g_in_weight.data() + static_cast<size_t>(k) * N + off;
+            const float* row = g_in_weight.data() + k * N + off;
             for (size_t n = 0; n < chunk; ++n)
                 sum += row[n] * d_network[off + n];
             d_h_i[k] += sum * inv_sqrt_S;
@@ -58,8 +56,15 @@ void backward_inject(const float* d_network, size_t S,
 void backward_propagate(float* d_network, float* d_incoming,
                         const float* phase2_act)
 {
-    // 直接在 d_network 上累加:每个 idx 只写自己的 d_network[idx] 和自己的
-    // g_prop_grad[idx] / g_skip_grad[e],无竞争(原本 d_combined 是冗余拷贝)
+    static std::vector<float> d_combined;
+    d_combined.resize(N);
+    #pragma omp parallel for
+    for (int j = 0; j < static_cast<int>(N); ++j)
+        d_combined[j] = d_network[j];
+
+    // 使用预计算坐标查找表和预存 tanh 值，无需原子操作
+    // 每个细胞只写自己的 g_prop_grad[idx] 和自己的 edges g_skip_grad[e]，
+    // 不同细胞对应不同的 idx/e，没有竞争
     #pragma omp parallel for
     for (int idx = 0; idx < static_cast<int>(N); ++idx) {
         int x = static_cast<int>(g_cell_x[idx]);
@@ -91,7 +96,7 @@ void backward_propagate(float* d_network, float* d_incoming,
         float dtanh = 1.0f - tanh_a * tanh_a;
         float act_a = tanh_a * 2.0f;
 
-        d_network[idx] += (grad_local * g_prop_weight[idx] + grad_skip) * dtanh;
+        d_combined[idx] += (grad_local * g_prop_weight[idx] + grad_skip) * dtanh;
         // 无竞争：每个 idx 对应唯一的 g_prop_grad[idx]
         g_prop_grad[idx] += grad_local * act_a;
 
@@ -103,7 +108,7 @@ void backward_propagate(float* d_network, float* d_incoming,
 
     #pragma omp parallel for
     for (int j = 0; j < static_cast<int>(N); ++j) {
-        float d_total = d_network[j];
+        float d_total = d_combined[j];
         d_incoming[j] = d_total;
         d_network[j] = d_total * g_time_decay;
     }
