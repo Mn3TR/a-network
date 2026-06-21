@@ -7,7 +7,6 @@
 struct SGDMomentum {
     float lr = g_lr;
     float mu = g_mu;
-    float clip_norm = g_clip_norm;
 
     std::vector<float> buf_embed;
     std::vector<float> buf_in_weight;
@@ -30,6 +29,12 @@ struct SGDMomentum {
     float m_cache_out_b  = 0.0f;
     float m_cache_prop   = 0.0f;
     float m_cache_skip   = 0.0f;
+
+    // 自适应梯度裁剪（EMA 追踪全局梯度范数）
+    int m_step_count = 0;
+    float m_ema_norm = 0.0f;
+    static constexpr float m_ema_decay = 0.99f;
+    static constexpr float m_clip_factor = 3.0f;
 
     void init();
     void step();

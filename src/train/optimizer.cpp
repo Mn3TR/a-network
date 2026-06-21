@@ -23,6 +23,10 @@ void SGDMomentum::init()
 
 void SGDMomentum::step()
 {
+    // 自适应裁剪阈值 = EMA(全局梯度范数) × clip_factor
+    float effective_clip = (m_step_count == 0) ?
+        100.0f : m_ema_norm * m_clip_factor;
+
     auto upd = [&](std::vector<float>& w, std::vector<float>& b,
                    const std::vector<float>& g, float* out_norm) {
         if (w.empty() || g.empty()) { if (out_norm) *out_norm = 0.0f; return; }
@@ -33,8 +37,8 @@ void SGDMomentum::step()
         float norm = static_cast<float>(std::sqrt(n2));
         if (out_norm) *out_norm = norm;
         float s = 1.0f;
-        if (n2 > static_cast<double>(clip_norm) * clip_norm)
-            s = clip_norm / norm;
+        if (n2 > static_cast<double>(effective_clip) * effective_clip)
+            s = effective_clip / norm;
 
         #pragma omp parallel for
         for (int i = 0; i < static_cast<int>(w.size()); ++i) {
@@ -54,6 +58,20 @@ void SGDMomentum::step()
         upd(g_skip_weight, buf_skip, g_skip_grad, &m_cache_skip);
     else
         m_cache_skip = 0.0f;
+
+    // 更新 EMA（从缓存的各张量范数合并为全局范数）
+    m_step_count++;
+    float total_norm = std::sqrt(
+        m_cache_embed * m_cache_embed +
+        m_cache_in_w  * m_cache_in_w  +
+        m_cache_in_b  * m_cache_in_b  +
+        m_cache_out_w * m_cache_out_w +
+        m_cache_out_b * m_cache_out_b +
+        m_cache_prop  * m_cache_prop  +
+        m_cache_skip  * m_cache_skip
+    );
+    if (m_step_count == 1) m_ema_norm = total_norm;
+    else m_ema_norm = m_ema_decay * m_ema_norm + (1.0f - m_ema_decay) * total_norm;
 }
 
 void SGDMomentum::zero_grad()

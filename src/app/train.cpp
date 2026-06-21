@@ -98,7 +98,6 @@ static int run_train(int argc, char* argv[])
     std::cout << "=== Initialization complete ===" << std::endl;
     std::cout << "Hyperparams: lr=" << g_lr
               << " mu=" << g_mu
-              << " clip=" << g_clip_norm
               << " prop_steps=" << g_prop_steps
               << " grad_accum=" << g_grad_accum
               << " hidden_dim=" << g_hidden_dim
