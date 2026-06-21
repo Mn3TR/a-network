@@ -16,6 +16,7 @@ public:
     void start_epoch(int epoch, int total_epochs, int total_steps);
     void step(float loss);
     void end_epoch(float avg_loss);
+    float avg_step_ms() const { return m_avg_step_ms; }
 
 private:
     static std::string bar(int filled, int total, int width);

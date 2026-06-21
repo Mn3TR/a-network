@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstring>
+#include <chrono>
 
 // ============ 生成模式 ============
 // 注入 → 传播 → 读出 h → LM Head → argmax
@@ -118,7 +119,7 @@ static int run_train(int argc, char* argv[])
 
     std::string log_train_path = std::string(g_log_dir) + "train_log.csv";
     std::ofstream log_train(log_train_path, std::ios::trunc);
-    log_train << "epoch,avg_loss,lr\n";
+    log_train << "epoch,avg_loss,avg_step_ms,epoch_s,lr\n";
 
     ProgressBar pb;
     int total_epochs = g_max_epochs;
@@ -132,6 +133,7 @@ static int run_train(int argc, char* argv[])
 
         float total_loss = 0.0f;
         int total_steps = 0;
+        auto epoch_start = std::chrono::steady_clock::now();
 
         pb.start_epoch(epoch, total_epochs,
                        static_cast<int>(tokens.size()) - 1);
@@ -171,7 +173,15 @@ static int run_train(int argc, char* argv[])
                           buffer.size() * sizeof(float));
         }
 
-        log_train << epoch << "," << avg_loss << "," << g_optim.lr << "\n";
+        float epoch_s = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - epoch_start).count();
+        float avg_step_ms = pb.avg_step_ms();
+
+        log_train << epoch << ","
+                  << avg_loss << ","
+                  << avg_step_ms << ","
+                  << epoch_s << ","
+                  << g_optim.lr << "\n";
         log_train.flush();
 
         if (avg_loss < g_min_loss) {

@@ -49,24 +49,21 @@ void tokens_to_field(const float* hidden, size_t S, float* field)
     size_t chunk = N / S;
     float inv_sqrt_S = 1.0f / std::sqrt(static_cast<float>(S));
 
-    #pragma omp parallel for
-    for (int ii = 0; ii < static_cast<int>(S); ++ii) {
-        size_t i = static_cast<size_t>(ii);
+    // 外层按 i 串行(为将来 S>1 留接口),内层按 n 并行直写 field
+    // S=1 时外层只一轮,内层把 N 维度并行化(原版按 S 并行在 S=1 时退化成单线程)
+    for (size_t i = 0; i < S; ++i) {
         const float* h_i = hidden + i * H;
         size_t off = i * chunk;
 
-        // 每个线程独立的栈缓冲，消除原 g_signal 的数据竞争
-        std::vector<float> signal(chunk);
-        for (size_t n = 0; n < chunk; ++n)
-            signal[n] = g_in_bias[off + n];
-        for (size_t k = 0; k < H; ++k) {
-            float hk = h_i[k];
-            if (hk == 0.0f) continue;
-            const float* row = g_in_weight.data() + k * N + off;
-            for (size_t n = 0; n < chunk; ++n)
-                signal[n] += hk * row[n];
+        #pragma omp parallel for
+        for (int n = 0; n < static_cast<int>(chunk); ++n) {
+            float s = g_in_bias[off + n];
+            for (size_t k = 0; k < H; ++k) {
+                float hk = h_i[k];
+                if (hk != 0.0f)
+                    s += hk * g_in_weight[k * N + off + n];
+            }
+            field[off + n] += s * inv_sqrt_S;  // 保持 += 累加语义(caller 依赖)
         }
-        for (size_t n = 0; n < chunk; ++n)
-            field[off + n] += signal[n] * inv_sqrt_S;
     }
 }
