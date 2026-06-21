@@ -1,6 +1,5 @@
 #pragma once
-#include "core/types.h"
-#include "tokenizer/bpe.h"
+#include "framework/tokenizer.h"
 #include <string>
 #include <vector>
 

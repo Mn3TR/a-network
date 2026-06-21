@@ -1,4 +1,4 @@
-#include "bpe.h"
+#include "framework/tokenizer.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -163,14 +163,16 @@ static bool json_enter_key(const char*& p, const char* end, const std::string& k
     return true;
 }
 
-// ============ 词表数据 ============
-std::vector<std::string> g_id_to_token;
-std::unordered_map<std::string, size_t> g_token_to_id;
-std::vector<std::pair<std::string, std::string>> g_merges;
-std::unordered_map<std::string, size_t> g_pair_priority;
+// ============ 构造 ============
+
+Tokenizer::Tokenizer(const std::string& path)
+{
+    load(path);
+}
 
 // ============ 加载 tokenizer.json ============
-void load_tokenizer(const std::string& path)
+
+void Tokenizer::load(const std::string& path)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) { std::cerr << "ERROR: Cannot open " << path << std::endl; return; }
@@ -197,8 +199,8 @@ void load_tokenizer(const std::string& path)
     if (p >= end || *p != '[') { std::cerr << "ERROR: merges not array" << std::endl; return; }
     ++p;
 
-    g_merges.clear();
-    g_pair_priority.clear();
+    m_merges.clear();
+    m_pair_priority.clear();
     size_t merge_count = 0;
     while (p < end) {
         json_skip_ws(p, end);
@@ -209,8 +211,8 @@ void load_tokenizer(const std::string& path)
             if (sp != std::string::npos) {
                 std::string left = pair_str.substr(0, sp);
                 std::string right = pair_str.substr(sp + 1);
-                g_merges.emplace_back(left, right);
-                g_pair_priority[pair_str] = merge_count;
+                m_merges.emplace_back(left, right);
+                m_pair_priority[pair_str] = merge_count;
                 ++merge_count;
             }
         }
@@ -227,9 +229,9 @@ void load_tokenizer(const std::string& path)
     if (p >= end || *p != '{') { std::cerr << "ERROR: vocab not object" << std::endl; return; }
     ++p;
 
-    g_id_to_token.clear();
-    g_token_to_id.clear();
-    g_id_to_token.resize(g_vocab_size);
+    m_id_to_token.clear();
+    m_token_to_id.clear();
+    m_id_to_token.resize(g_vocab_size);
 
     size_t loaded = 0;
     while (p < end) {
@@ -247,8 +249,8 @@ void load_tokenizer(const std::string& path)
             ++p;
         }
         if (id < g_vocab_size) {
-            g_id_to_token[id] = token_str;
-            g_token_to_id[token_str] = id;
+            m_id_to_token[id] = token_str;
+            m_token_to_id[token_str] = id;
             ++loaded;
         }
         json_skip_ws(p, end);
@@ -256,9 +258,9 @@ void load_tokenizer(const std::string& path)
     }
 
     for (size_t i = 0; i < g_vocab_size; ++i) {
-        if (g_id_to_token[i].empty()) {
-            g_id_to_token[i] = "<UNK>";
-            g_token_to_id["<UNK>"] = i;
+        if (m_id_to_token[i].empty()) {
+            m_id_to_token[i] = "<UNK>";
+            m_token_to_id["<UNK>"] = i;
         }
     }
 
@@ -267,15 +269,16 @@ void load_tokenizer(const std::string& path)
 }
 
 // ============ BPE 合并 ============
-static std::vector<std::string> bpe_merge(std::vector<std::string> pieces)
+
+std::vector<std::string> Tokenizer::bpe_merge(std::vector<std::string> pieces) const
 {
     while (pieces.size() > 1) {
         size_t best_pos = SIZE_MAX;
         size_t best_pri = SIZE_MAX;
         for (size_t i = 0; i < pieces.size() - 1; ++i) {
             auto key = pieces[i] + " " + pieces[i + 1];
-            auto it = g_pair_priority.find(key);
-            if (it != g_pair_priority.end() && it->second < best_pri) {
+            auto it = m_pair_priority.find(key);
+            if (it != m_pair_priority.end() && it->second < best_pri) {
                 best_pri = it->second;
                 best_pos = i;
             }
@@ -288,7 +291,8 @@ static std::vector<std::string> bpe_merge(std::vector<std::string> pieces)
 }
 
 // ============ 文本 → token ID ============
-std::vector<size_t> sentencepiece_to_tokens(const std::string& text)
+
+std::vector<size_t> Tokenizer::encode(const std::string& text) const
 {
     build_bytelevel_tables();
     std::string normalized = " " + text;
@@ -310,23 +314,48 @@ std::vector<size_t> sentencepiece_to_tokens(const std::string& text)
     std::vector<size_t> ids;
     ids.reserve(merged.size());
     for (const auto& tok : merged) {
-        auto it = g_token_to_id.find(tok);
-        if (it != g_token_to_id.end()) ids.push_back(it->second);
+        auto it = m_token_to_id.find(tok);
+        if (it != m_token_to_id.end()) ids.push_back(it->second);
     }
     return ids;
 }
 
 // ============ token ID → 文本 ============
-std::string tokens_to_sentence(const std::vector<size_t>& ids)
+
+std::string Tokenizer::decode(const std::vector<size_t>& ids) const
 {
     build_bytelevel_tables();
     std::string bytelevel_str;
     for (auto id : ids) {
-        if (id < g_id_to_token.size())
-            bytelevel_str += g_id_to_token[id];
+        if (id < m_id_to_token.size())
+            bytelevel_str += m_id_to_token[id];
     }
     std::string result = bytelevel_to_text(bytelevel_str);
     if (!result.empty() && result[0] == ' ')
         result = result.substr(1);
     return result;
+}
+
+// ============ 查询 ============
+
+const std::string& Tokenizer::id_to_token(size_t id) const
+{
+    static std::string s_unknown = "<?>";
+    if (id >= m_id_to_token.size()) return s_unknown;
+    return m_id_to_token[id];
+}
+
+size_t Tokenizer::token_to_id(const std::string& token) const
+{
+    auto it = m_token_to_id.find(token);
+    return (it != m_token_to_id.end()) ? it->second : 0;
+}
+
+// ============ 全局默认实例 ============
+
+static Tokenizer s_default_tokenizer;
+
+Tokenizer& global_tokenizer()
+{
+    return s_default_tokenizer;
 }

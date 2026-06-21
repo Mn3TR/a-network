@@ -1,5 +1,4 @@
 #include "data.h"
-#include "tokenizer/bpe.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
