@@ -17,6 +17,12 @@
 #include <vector>
 #include <cstring>
 #include <chrono>
+#include <ctime>
+#include <filesystem>
+
+// 全局路径（run_train 中会改为时间戳目录）
+std::string g_weights_path = "output/weights.bin";
+std::string g_log_dir = "log/";
 
 // ============ 生成模式 ============
 // 注入 → 传播 → 读出 h → LM Head → argmax
@@ -95,6 +101,31 @@ static int run_train(int argc, char* argv[])
     load_tokenizer(g_tokenizer_path);
     init_all();                           // 工作区（幂等）+ 梯度缓冲
     g_optim.init();
+
+    // 生成时间戳目录，避免每次运行覆盖
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm;
+#ifdef _WIN32
+        localtime_s(&tm, &tt);
+#else
+        localtime_r(&tt, &tm);
+#endif
+        char buf[24];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d-%H%M", &tm);
+        std::string stamp(buf);
+
+        g_log_dir = "log/" + stamp + "/";
+        std::string out_dir = "output/output-" + stamp + "/";
+        g_weights_path = out_dir + "weights.bin";
+
+        std::filesystem::create_directories(g_log_dir);
+        std::filesystem::create_directories(out_dir);
+
+        std::cout << "Log dir: " << g_log_dir << std::endl;
+        std::cout << "Output dir: " << out_dir << std::endl;
+    }
 
     std::cout << "=== Initialization complete ===" << std::endl;
     std::cout << "Hyperparams: lr=" << g_lr

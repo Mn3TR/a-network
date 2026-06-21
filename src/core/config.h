@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <string>
 
 // ============ 训练超参数 ============
 
@@ -18,8 +19,8 @@ constexpr float g_mu = 0.9f;          // 动量系数
 constexpr int g_max_epochs = 100;       // 最多 epoch 数（训练终止条件之一）
 constexpr float g_min_loss = 0.0f;     // 设为 0 禁用提前终止
 
-// 路径
-constexpr const char* g_weights_path = "output/weights.bin";
+// 路径（运行时可变——run_train 会改为时间戳目录）
+extern std::string g_weights_path;
+extern std::string g_log_dir;
 constexpr const char* g_tokenizer_path = "tokenizer/tokenizer.json";
 constexpr const char* g_data_dir = "dataset/";
-constexpr const char* g_log_dir = "log/";

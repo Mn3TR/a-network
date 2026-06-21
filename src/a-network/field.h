@@ -34,5 +34,5 @@ void init_propagation();
 // act_tanh: 如果非空，存储 tanh(network[idx]*0.5) 到该缓冲区（供反向传播使用）
 void propagate_step(float* network, float* incoming, float* act_tanh = nullptr);
 
-// 在 NetworkView 上执行一步传播（供 generate 使用）
-void propagate_network(NetworkView network);
+// 一步传播（供 generate 使用）
+void propagate_network(float* network);

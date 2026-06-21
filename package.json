@@ -4,9 +4,14 @@
   "private": true,
   "scripts": {
     "build": "script\\build.bat",
+    "build:linux": "bash script/build.sh",
     "train": "train.exe",
+    "train:linux": "./train",
     "train:load": "train.exe load",
+    "train:load:linux": "./train load",
     "gen": "train.exe gen",
-    "start": "npm run build && npm run train"
+    "gen:linux": "./train gen",
+    "start": "npm run build && npm run train",
+    "start:linux": "npm run build:linux && npm run train:linux"
   }
 }

@@ -1,13 +1,10 @@
 #pragma once
-#include <mdspan>
 #include <cstddef>
 
 // ============ 张量维度 ============
 constexpr size_t network_x = 80;
 constexpr size_t network_y = 80;
 constexpr size_t network_z = 80;
-
-using NetworkView = std::mdspan<float, std::extents<size_t, network_x, network_y, network_z>>;
 
 // ============ ConvertLayer 常量 ============
 constexpr size_t g_vocab_size = 128256;

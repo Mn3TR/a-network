@@ -229,7 +229,7 @@ void propagate_step(float* network, float* incoming, float* act_tanh)
     }
 }
 
-void propagate_network(NetworkView network)
+void propagate_network(float* network)
 {
-    propagate_step(network.data_handle(), g_incoming.data());
+    propagate_step(network, g_incoming.data());
 }
