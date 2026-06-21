@@ -13,7 +13,11 @@ constexpr size_t g_grad_accum = 4;
 // 优化器参数
 constexpr float g_lr = 0.0001f;       // 初始学习率
 constexpr float g_lr_min = 0.000001f; // 最低学习率（退火终点）
-constexpr float g_mu = 0.9f;          // 动量系数
+
+// Adam 超参数
+constexpr float g_beta1 = 0.9f;       // 一阶矩衰减系数
+constexpr float g_beta2 = 0.999f;     // 二阶矩衰减系数
+constexpr float g_eps = 1e-8f;        // 数值稳定性常数
 
 // 训练终止条件
 constexpr int g_max_epochs = 100;       // 最多 epoch 数（训练终止条件之一）
