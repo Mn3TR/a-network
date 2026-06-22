@@ -7,9 +7,8 @@
 float ANetwork::lm_head_loss(const float* h, size_t target_id, float* d_h)
 {
     size_t H = m_H, V = m_V;
-    static thread_local std::vector<float> logits, d_logits;
-    logits.resize(V);
-    d_logits.resize(V);
+    float* logits = m_head_logits.data();
+    float* d_logits = m_head_d_logits.data();
 
     // logits = embed_weight * h
     #pragma omp parallel for
@@ -21,7 +20,7 @@ float ANetwork::lm_head_loss(const float* h, size_t target_id, float* d_h)
         logits[static_cast<size_t>(t)] = sum;
     }
 
-    float loss = cross_entropy_loss(logits.data(), target_id, d_logits.data());
+    float loss = cross_entropy_loss(logits, target_id, d_logits);
 
     // d_h = embed_weight^T * d_logits
     #pragma omp parallel for
@@ -62,33 +61,29 @@ float ANetwork::train_step(size_t input_id, size_t target_id)
         propagate_step(m_flat_net.data(), m_incoming.data(), m_prop_act[s].data());
 
     // 3. 读 h → LM Head → loss
-    static thread_local std::vector<float> h_cur;
-    h_cur.assign(H, 0.0f);
-    static thread_local std::vector<float> d_h_cur;
-    d_h_cur.assign(H, 0.0f);
-    readout_h(m_flat_net.data(), h_cur.data());
-    float loss = lm_head_loss(h_cur.data(), target_id, d_h_cur.data());
+    std::fill(m_head_h_cur.begin(), m_head_h_cur.end(), 0.0f);
+    std::fill(m_head_d_h_cur.begin(), m_head_d_h_cur.end(), 0.0f);
+    readout_h(m_flat_net.data(), m_head_h_cur.data());
+    float loss = lm_head_loss(m_head_h_cur.data(), target_id, m_head_d_h_cur.data());
 
     // ---- 反向 ----
 
     // 1. 读出头反向
-    static thread_local std::vector<float> d_network;
-    d_network.assign(m_N, 0.0f);
-    backward_readout_h(d_h_cur.data(), d_network.data());
+    std::fill(m_head_d_network.begin(), m_head_d_network.end(), 0.0f);
+    backward_readout_h(m_head_d_h_cur.data(), m_head_d_network.data());
 
     // 2. 传播反向
     std::fill(m_incoming.begin(), m_incoming.end(), 0.0f);
     for (int s = static_cast<int>(prop_steps) - 1; s >= 0; --s)
-        backward_propagate(d_network.data(), m_incoming.data(), m_prop_act[s].data());
+        backward_propagate(m_head_d_network.data(), m_incoming.data(), m_prop_act[s].data());
 
     // 3. 注入反向
-    static thread_local std::vector<float> d_emb;
-    d_emb.assign(H, 0.0f);
-    backward_inject(d_network.data(), 1, emb, d_emb.data());
+    std::fill(m_head_d_emb.begin(), m_head_d_emb.end(), 0.0f);
+    backward_inject(m_head_d_network.data(), 1, emb, m_head_d_emb.data());
 
     // 4. Embedding 梯度
     float* row = m_embed_grad.data() + input_id * H;
-    for (size_t k = 0; k < H; ++k) row[k] += d_emb[k];
+    for (size_t k = 0; k < H; ++k) row[k] += m_head_d_emb[k];
 
     return loss;
 }
@@ -108,23 +103,20 @@ size_t ANetwork::generate_step(size_t input_id)
         propagate_step(m_flat_net.data(), m_incoming.data());
 
     // 3. 读 h
-    static thread_local std::vector<float> h_cur;
-    h_cur.assign(H, 0.0f);
-    readout_h(m_flat_net.data(), h_cur.data());
+    std::fill(m_head_h_cur.begin(), m_head_h_cur.end(), 0.0f);
+    readout_h(m_flat_net.data(), m_head_h_cur.data());
 
     // 4. LM Head → logits
-    static thread_local std::vector<float> logits;
-    logits.assign(V, 0.0f);
     #pragma omp parallel for
     for (int t = 0; t < static_cast<int>(V); ++t) {
         float sum = 0.0f;
         const float* row = m_embed_weight.data() + static_cast<size_t>(t) * H;
         for (size_t k = 0; k < H; ++k)
-            sum += row[k] * h_cur[k];
-        logits[static_cast<size_t>(t)] = sum;
+            sum += row[k] * m_head_h_cur[k];
+        m_head_logits[static_cast<size_t>(t)] = sum;
     }
 
     // 5. Argmax
-    auto it = std::max_element(logits.begin(), logits.end());
-    return static_cast<size_t>(std::distance(logits.begin(), it));
+    auto it = std::max_element(m_head_logits.begin(), m_head_logits.end());
+    return static_cast<size_t>(std::distance(m_head_logits.begin(), it));
 }

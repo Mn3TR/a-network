@@ -30,12 +30,12 @@ std::string Generator::generate(const std::string& seed, int max_tokens)
 
     std::vector<size_t> generated = seed_tokens;
 
-    // 用 seed tokens 构建场状态
+    // 用前 N-1 个种子 token 构建场状态（最后一个留给自回归循环处理）
     m_net.reset_state();
-    for (size_t t = 0; t < seed_tokens.size(); ++t)
+    for (size_t t = 0; t + 1 < seed_tokens.size(); ++t)
         m_net.generate_step(seed_tokens[t]);
 
-    // 自回归生成
+    // 自回归生成（第一个循环迭代处理最后一个种子 token）
     for (int i = 0; i < max_tokens; ++i) {
         size_t pred = m_net.generate_step(generated.back());
 

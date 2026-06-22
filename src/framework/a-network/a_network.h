@@ -68,6 +68,16 @@ private:
     std::vector<float> m_diff;           // [N]，field - b_out
     std::vector<std::vector<float>> m_prop_act; // [prop_steps][N]，前向 tanh 激活值
 
+    // ---- LM Head / train_step 工作区（替换 static thread_local，避免 OMP 冲突） ----
+
+    std::vector<float> m_head_logits;    // [V]  LM Head logits
+    std::vector<float> m_head_d_logits;  // [V]  LM Head logits 梯度
+    std::vector<float> m_head_h_cur;     // [H]  当前 hidden
+    std::vector<float> m_head_d_h_cur;   // [H]  hidden 梯度
+    std::vector<float> m_head_d_network; // [N]  场梯度
+    std::vector<float> m_head_d_emb;     // [H]  embedding 梯度
+    std::vector<float> m_act_work;       // [N]  propagate_step 备用激活缓冲区
+
     // ---- 坐标表 ----
 
     std::vector<uint32_t> m_cell_x;      // [N]

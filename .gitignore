@@ -1,5 +1,6 @@
 # 编译产物
 train.exe
+test_step.exe
 tmp/
 build_gpu/
 

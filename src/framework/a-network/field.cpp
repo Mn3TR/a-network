@@ -9,12 +9,11 @@ void ANetwork::propagate_step(float* network, float* incoming, float* act_tanh)
     size_t N = m_N;
     float decay = m_cfg.time_decay;
 
-    // 确保有激活值缓冲区
-    static thread_local std::vector<float> s_act_work;
+    // 确保有激活值缓冲区（未传入时用成员缓冲区）
     float* act = act_tanh;
     if (!act) {
-        s_act_work.resize(N);
-        act = s_act_work.data();
+        if (m_act_work.size() != N) m_act_work.resize(N);
+        act = m_act_work.data();
     }
 
     // Phase 1+2 合并: 衰减、接收 incoming、清零 incoming、计算激活

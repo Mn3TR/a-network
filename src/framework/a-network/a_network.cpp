@@ -178,6 +178,15 @@ void ANetwork::init_weights()
     for (auto& v : m_prop_act)
         v.resize(m_N);
 
+    // 工作区
+    m_head_logits.assign(m_V, 0.0f);
+    m_head_d_logits.assign(m_V, 0.0f);
+    m_head_h_cur.assign(m_H, 0.0f);
+    m_head_d_h_cur.assign(m_H, 0.0f);
+    m_head_d_network.assign(m_N, 0.0f);
+    m_head_d_emb.assign(m_H, 0.0f);
+    m_act_work.clear();  // 按需分配
+
     // 坐标表
     build_coord_tables();
 
@@ -345,6 +354,15 @@ void ANetwork::load(const std::string& path)
     m_prop_act.resize(m_cfg.prop_steps);
     for (auto& v : m_prop_act)
         v.resize(m_N);
+
+    // 工作区
+    m_head_logits.assign(m_V, 0.0f);
+    m_head_d_logits.assign(m_V, 0.0f);
+    m_head_h_cur.assign(m_H, 0.0f);
+    m_head_d_h_cur.assign(m_H, 0.0f);
+    m_head_d_network.assign(m_N, 0.0f);
+    m_head_d_emb.assign(m_H, 0.0f);
+    m_act_work.clear();  // 按需分配
 
     // 梯度缓存
     auto init_grad = [](std::vector<float>& g, size_t sz) {
