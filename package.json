@@ -1,17 +1,13 @@
 {
   "name": "test_network",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
-    "build": "script\\build.bat",
-    "build:linux": "bash script/build.sh",
-    "train": "train.exe",
-    "train:linux": "./train",
-    "train:load": "train.exe load",
-    "train:load:linux": "./train load",
-    "gen": "train.exe gen",
-    "gen:linux": "./train gen",
-    "start": "npm run build && npm run train",
-    "start:linux": "npm run build:linux && npm run train:linux"
+    "train": "python -m src.anetwork.train",
+    "train:load": "python -m src.anetwork.train load",
+    "gen": "python -m src.anetwork.train gen",
+    "viz": "python utils/viz_field.py",
+    "start": "python -m src.anetwork.train",
+    "install:deps": "pip install -r requirements.txt"
   }
 }

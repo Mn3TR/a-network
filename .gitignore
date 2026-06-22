@@ -1,13 +1,12 @@
-# 编译产物
-train.exe
-test_step.exe
-tmp/
-build_gpu/
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
 
 # 训练权重
 output/
-weights_no_energy_loss.bin
-weights_no_energy_loss_report.txt
+*.pt
+*.pth
 
 # 训练日志 & 场快照
 log/
@@ -21,21 +20,19 @@ reasonix.toml
 # 系统文件
 Thumbs.db
 .DS_Store
-
-# Windows 保留设备名
-nul
-NUL
-Nul
 .vscode/
 
 # 旧备份
+*.zip
 srcback.zip
 
 # 场可视化输出
 1/
 
-# zip 压缩包
-*.zip
+# Windows 保留设备名
+nul
+NUL
+Nul
 
-# zip 压缩包
-*.zip
+# 临时
+tmp/
