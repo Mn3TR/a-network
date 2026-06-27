@@ -9,9 +9,26 @@ from .tokenizer import TokenizerWrapper
 
 
 def load_data(dataset_source: str, tokenizer: TokenizerWrapper) -> list:
-    """下载 HuggingFace 数据集，拼接文本后一次性 tokenize"""
-    print(f"  Downloading '{dataset_source}' ...")
-    ds = load_dataset(dataset_source, split="train")
+    """下载 HuggingFace 数据集，拼接文本后一次性 tokenize
+
+    支持格式:
+      "用户名/数据集名"                          — 无 config
+      "用户名/数据集名,config名"                  — 有 config
+      "用户名/数据集名,config名,split=名称"       — config + split
+      "用户名/数据集名,split=名称"                — 仅 split
+    """
+    parts = dataset_source.split(",")
+    ds_name = parts[0]
+    config = None
+    split = "train"
+    for p in parts[1:]:
+        if p.startswith("split="):
+            split = p.split("=", 1)[1]
+        elif p:
+            config = p
+
+    print(f"  Downloading '{ds_name}' (config={config}, split={split}) ...")
+    ds = load_dataset(ds_name, config, split=split)
     text_col = "text" if "text" in ds.features else "content"
     all_text = "\n".join(ds[text_col])
     tokens = tokenizer.encode(all_text)
