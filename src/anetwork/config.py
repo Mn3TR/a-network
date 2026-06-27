@@ -48,11 +48,17 @@ class TrainConfig:
     beta2: float = 0.999
     eps: float = 1e-8
 
+    # Batch
+    batch_size: int = 1
+
     # 路径
     tokenizer_path: str = "tokenizer/tokenizer.json"
     data_dir: str = "dataset/"
     weights_path: str = "output/weights.pt"
     log_dir: str = "log/"
+
+    # 数据集来源: "local" | "huggingface:数据集名" | "url:http://..."
+    dataset_source: str = "local"
 
     # 生成
     gen_max_tokens: int = 100

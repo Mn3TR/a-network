@@ -2,16 +2,21 @@
 """
 A-Network 训练 / 生成入口
 ==========================
-替代 src/app/train.cpp + src/framework/trainer.cpp + src/framework/generator.cpp
 
 用法:
-    python -m src.anetwork.train              # 全新训练
-    python -m src.anetwork.train load         # 从 checkpoint 继续
-    python -m src.anetwork.train gen [seed]   # 生成模式
+    python -m src.anetwork.train                          # 全新训练（本地数据）
+    python -m src.anetwork.train load                     # 从 checkpoint 继续
+    python -m src.anetwork.train gen [seed]               # 生成模式
+
+环境变量（可选）:
+    DATASET=huggingface:roneneldan/TinyStories   使用在线数据集
+    DATASET=url:https://example.com/data.txt     从 URL 下载
+    BATCH_SIZE=4                                 批量大小
 """
 
 import math
 import sys
+import os
 import time
 import csv
 from pathlib import Path
@@ -22,7 +27,7 @@ import torch
 from .config import ANetworkConfig, TrainConfig
 from .model import ANetwork
 from .tokenizer import TokenizerWrapper
-from .data import load_data
+from .data import load_data, pack_batch, count_batch_steps
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -54,43 +59,49 @@ class ProgressBar:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def train(net: ANetwork, tokens: list, tcfg: TrainConfig, device: torch.device):
-    """训练主循环"""
+    """训练主循环（支持 batch）"""
     if not tokens:
         print("No training data!")
         return
 
+    B = tcfg.batch_size
+    N = net.cfg.N
+    total_steps = count_batch_steps(tokens, B)
+
+    if total_steps < 1:
+        print("ERROR: Not enough tokens for batch training.")
+        return
+
     print(f"\n{'=' * 42}")
     print(f"Training start")
-    print(f"  lr={tcfg.lr}  grad_accum={tcfg.grad_accum}  epochs={tcfg.max_epochs}")
+    print(f"  lr={tcfg.lr}  grad_accum={tcfg.grad_accum}")
+    print(f"  batch_size={B}  total_steps_per_epoch={total_steps}")
     print(f"  tokens={len(tokens)}  device={device}")
     print(f"{'=' * 42}\n")
 
-    # 优化器 + 余弦学习率退火
+    # 优化器
     optimizer = torch.optim.Adam(
         net.parameters(), lr=tcfg.lr,
         betas=(tcfg.beta1, tcfg.beta2), eps=tcfg.eps
     )
 
-    total_epochs = tcfg.max_epochs
-    total_steps = len(tokens) - 1
-
     # 日志目录
     log_dir = Path(tcfg.log_dir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = log_dir / timestamp
+    batch_info = f"_B{B}" if B > 1 else ""
+    run_dir = log_dir / f"{timestamp}{batch_info}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # CSV 日志
     epoch_log = open(run_dir / "epoch_log.csv", "w", newline="")
     epoch_writer = csv.writer(epoch_log)
     epoch_writer.writerow(["epoch", "avg_loss", "avg_step_ms", "epoch_s", "lr"])
 
     best_loss = float("inf")
 
-    for epoch in range(total_epochs):
+    for epoch in range(tcfg.max_epochs):
         # 余弦学习率退火
-        if total_epochs > 1:
-            progress = epoch / (total_epochs - 1)
+        if tcfg.max_epochs > 1:
+            progress = epoch / (tcfg.max_epochs - 1)
             factor = (1.0 + math.cos(math.pi * progress)) * 0.5
             lr = tcfg.lr_min + (tcfg.lr - tcfg.lr_min) * factor
             for pg in optimizer.param_groups:
@@ -98,27 +109,35 @@ def train(net: ANetwork, tokens: list, tcfg: TrainConfig, device: torch.device):
         else:
             lr = tcfg.lr
 
-        net.reset_state()
         net.train()
-
         epoch_loss = 0.0
         epoch_start = time.time()
 
-        # 进度条信息
         pb = ProgressBar(total_steps)
-
         optimizer.zero_grad()
 
-        for step_idx in range(total_steps):
-            input_id = torch.tensor(tokens[step_idx], device=device)
-            target_id = torch.tensor(tokens[step_idx + 1], device=device)
+        # ── 初始化场状态 ──
+        if B > 1:
+            fields = torch.zeros(B, N, device=device)
+            incomings = torch.zeros(B, N, device=device)
+        else:
+            net.reset_state()
 
-            loss = net.train_step(input_id, target_id)
+        for step_idx, (inputs, targets) in enumerate(pack_batch(tokens, B)):
+            input_ids = torch.tensor(inputs, device=device)
+            target_ids = torch.tensor(targets, device=device)
+
+            if B > 1:
+                # Batched 训练
+                loss, fields, incomings = net.train_step_batch(
+                    fields, incomings, input_ids, target_ids)
+            else:
+                # 单序列训练
+                loss = net.train_step(input_ids[0], target_ids[0])
+
             loss.backward()
-
             epoch_loss += loss.item()
 
-            # 梯度积累
             if (step_idx + 1) % tcfg.grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -126,7 +145,7 @@ def train(net: ANetwork, tokens: list, tcfg: TrainConfig, device: torch.device):
 
             pb.step(step_idx + 1, loss.item())
 
-        # 处理剩余的梯度积累
+        # 剩余梯度
         if total_steps % tcfg.grad_accum != 0:
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
             optimizer.step()
@@ -139,12 +158,12 @@ def train(net: ANetwork, tokens: list, tcfg: TrainConfig, device: torch.device):
         pb.step(total_steps, avg_loss)
         print()
 
-        # 日志
+        # CSV 日志
         epoch_writer.writerow([epoch, f"{avg_loss:.6f}", f"{avg_step_ms:.2f}",
                                f"{epoch_s:.1f}", f"{lr:.8f}"])
         epoch_log.flush()
 
-        # 场快照
+        # 场快照（batch 时取第一个序列）
         field_path = run_dir / f"field_e{epoch}.bin"
         net.dump_field(str(field_path))
 
@@ -153,21 +172,16 @@ def train(net: ANetwork, tokens: list, tcfg: TrainConfig, device: torch.device):
               f"epoch_s={epoch_s:.1f}  "
               f"lr={lr:.8f}")
 
-        # 早停
         if avg_loss < tcfg.min_loss:
             print(f">>> Early stop (loss={avg_loss:.6f} < min_loss={tcfg.min_loss})")
             break
 
-        # 保存最佳权重
         if avg_loss < best_loss:
             best_loss = avg_loss
             net.save(str(run_dir / "best.pt"))
 
     epoch_log.close()
-
-    # 保存最终权重
     net.save(str(run_dir / "final.pt"))
-    # 同时保存到 output/weights.pt 以便加载
     net.save(tcfg.weights_path)
 
     print(f"\n{'=' * 42}")
@@ -187,11 +201,8 @@ def generate(net: ANetwork, tokenizer: TokenizerWrapper,
     print(f"Seed: \"{seed_text}\"")
 
     generated = net.generate(seed_ids, max_tokens=max_tokens)
-
-    # 解码并打印输出
     output_text = tokenizer.decode(generated)
     print(f"\nFull text:\n{output_text}")
-
     return output_text
 
 
@@ -210,7 +221,18 @@ def main():
     a_cfg = ANetworkConfig()
     tcfg = TrainConfig()
 
-    # 加载 tokenizer（需要提前获取词表大小）
+    # 从环境变量覆盖参数（方便 Colab 和脚本使用）
+    env_dataset = os.environ.get("DATASET")
+    if env_dataset:
+        tcfg.dataset_source = env_dataset
+        print(f"  ENV: dataset_source = {env_dataset}")
+
+    env_batch = os.environ.get("BATCH_SIZE")
+    if env_batch:
+        tcfg.batch_size = int(env_batch)
+        print(f"  ENV: batch_size = {tcfg.batch_size}")
+
+    # 加载 tokenizer
     tokenizer = TokenizerWrapper(tcfg.tokenizer_path)
     a_cfg.vocab_size = tokenizer.vocab_size
 
@@ -218,17 +240,15 @@ def main():
     net = ANetwork(a_cfg, device=device)
 
     if gen_mode:
-        # ── 生成模式 ──
         net.to(device)
         if not net.load(tcfg.weights_path):
-            print("ERROR: No trained weights found. Train first or specify a different path.")
+            print("ERROR: No trained weights found.")
             return
-
         seed_text = sys.argv[2] if len(sys.argv) > 2 else tcfg.seed_text
         generate(net, tokenizer, seed_text, tcfg.gen_max_tokens)
         return
 
-    # ── 训练模式 ──
+    # 训练模式
     net.to(device)
 
     if load_mode:
@@ -238,10 +258,9 @@ def main():
         print("Initializing fresh weights.")
 
     # 加载数据
-    print(f"Loading data from '{tcfg.data_dir}' ...")
-    tokens = load_data(tcfg.data_dir, tokenizer)
+    print(f"Loading data (source={tcfg.dataset_source}) ...")
+    tokens = load_data(tcfg.data_dir, tokenizer, tcfg.dataset_source)
 
-    # 训练
     train(net, tokens, tcfg, device)
 
 

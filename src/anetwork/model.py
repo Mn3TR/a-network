@@ -186,15 +186,16 @@ class ANetwork(nn.Module):
     def _inject(self, field: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         """将隐藏向量注入到场中
 
+        支持单条 (N,) 和 batch (B,N) 两种输入。
+
         Args:
-            field: 当前场状态 [N]
-            h: 隐藏向量 [H]（embedding lookup 结果）
+            field: 当前场状态 [N] 或 [B, N]
+            h: 隐藏向量 [H]（单条）或 [B, H]（batch）
 
         Returns:
-            更新后的场 [N]
+            更新后的场
         """
-        # injection = in_bias + h @ in_weight   (N,)
-        # S=1 时 inv_sqrt_S = 1
+        # injection = in_bias + h @ in_weight   -> (N,) or (B, N)
         injection = self.in_bias + h @ self.in_weight
         return field + injection
 
@@ -202,19 +203,22 @@ class ANetwork(nn.Module):
                    incoming: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """一步传播
 
+        支持单条 (N,) 和 batch (B,N) 两种输入。
+        conv3d 天然支持 batch 维，只需调整 reshape 维度即可。
+
         流程:
           1. field *= decay; field += incoming; incoming = 0
           2. act = tanh(field / 2)
           3. signal = 2 * act * prop_weight
           4. conv3d gather 26-邻域 → new_incoming
-          5. scatter_add 跳跃连接 → new_incoming
+          5. index_add 跳跃连接 → new_incoming
 
         Args:
-            field: 当前场 [N]
-            incoming: 邻域输入缓冲区 [N]
+            field: [N] 或 [B, N]
+            incoming: [N] 或 [B, N]
 
         Returns:
-            (new_field, new_incoming)
+            (new_field, new_incoming)  形状与输入一致
         """
         cfg = self.cfg
 
@@ -222,43 +226,45 @@ class ANetwork(nn.Module):
         new_field = field * cfg.time_decay + incoming
         act = torch.tanh(new_field * 0.5)
 
-        # Phase 3: scatter 信号到邻域（使用 conv3d 做高效 gather，
-        # 由于邻域关系对称，gather 等价于 scatter）
-        signal = 2.0 * act * self.prop_weight  # [N]
+        # Phase 3: signal = 2 * act * prop_weight  广播自动处理 batch
+        signal = 2.0 * act * self.prop_weight  # [N] or [B, N]
 
-        # 3D 卷积：每个细胞收集 26 个邻域的 signal
+        # conv3d gather: reshape 为 (B, 1, X, Y, Z) 或 (1, 1, X, Y, Z)
         X, Y, Z = cfg.network_x, cfg.network_y, cfg.network_z
-        signal_3d = signal.reshape(1, 1, X, Y, Z)
+        ndim = signal.dim()  # 1=single, 2=batch
+        signal_3d = signal.reshape(-1, 1, X, Y, Z) if ndim == 2 else signal.reshape(1, 1, X, Y, Z)
         new_incoming = F.conv3d(signal_3d, self.neighbor_kernel,
-                                padding=1).reshape(-1)  # [N]
+                                padding=1).reshape(signal.shape)
 
-        # 跳跃连接
+        # 跳跃连接：index_add 同时兼容 1D 和 2D
         if self.skip_src is not None and self.skip_src.numel() > 0:
-            skip_signal = signal[self.skip_src] * self.skip_weight
-            new_incoming.scatter_add_(0, self.skip_dst, skip_signal)
+            skip_signal = signal[..., self.skip_src] * self.skip_weight
+            new_incoming.index_add_(-1, self.skip_dst, skip_signal)
 
         return new_field, new_incoming
 
     def _readout(self, field: torch.Tensor) -> torch.Tensor:
         """从场读出隐藏向量
 
-        h = out_weight @ (field - out_bias)
+        h = (field - out_bias) @ out_weight^T
+        改写为矩阵乘形式以兼容 batch。
 
         Returns:
-            h [H]
+            h [H]（单条）或 [B, H]（batch）
         """
         diff = field - self.out_bias
-        return self.out_weight @ diff  # [H]
+        return diff @ self.out_weight.T  # [H] or [B, H]
 
     def _lm_head(self, h: torch.Tensor) -> torch.Tensor:
         """LM Head: 隐藏向量 → logits（权值共享）
 
-        logits = embed_weight @ h
+        logits = h @ embed_weight^T
+        改写为矩阵乘形式以兼容 batch。
 
         Returns:
-            logits [V]
+            logits [V]（单条）或 [B, V]（batch）
         """
-        return self.embed_weight @ h  # [V]
+        return h @ self.embed_weight.T  # [V] or [B, V]
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  训练步
@@ -266,10 +272,9 @@ class ANetwork(nn.Module):
 
     def train_step(self, input_id: torch.Tensor,
                    target_id: torch.Tensor) -> torch.Tensor:
-        """单个 token 的训练步（前向 + 反向）
+        """单序列训练步（保留兼容）
 
-        注意：场状态 self.field 在此步中被 detach，
-        因此梯度不会跨 token 传播。
+        内部委托给 train_step_batch, batch_size=1。
 
         Args:
             input_id: 标量 [0, V-1]
@@ -278,33 +283,58 @@ class ANetwork(nn.Module):
         Returns:
             loss 标量
         """
-        # 断开跨 token 的梯度流（状态携带但梯度不回溯）
-        field = self.field.detach()
-        incoming = torch.zeros_like(self.incoming)
+        field = self.field.detach().unsqueeze(0)   # [1, N]
+        incoming = torch.zeros_like(field)
 
-        # 1. 注入
-        h = self.embed_weight[input_id]                 # [H]
-        field = self._inject(field, h)
+        loss, new_field, _ = self.train_step_batch(
+            field, incoming, input_id.unsqueeze(0), target_id.unsqueeze(0))
 
-        # 2. 传播
+        # 恢复单序列状态
+        with torch.no_grad():
+            self.field.copy_(new_field[0])
+
+        return loss
+
+    def train_step_batch(self, fields: torch.Tensor,
+                         incomings: torch.Tensor,
+                         input_ids: torch.Tensor,
+                         target_ids: torch.Tensor,
+                         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Batched 训练步（前向 + 反向）
+
+        多个独立序列共享网络参数，但各有独立的场状态。
+        conv3d 和矩阵乘天然支持 batch，仅跳跃连接需注意。
+
+        Args:
+            fields: [B, N] 各序列的当前场状态
+            incomings: [B, N] 各序列的 incoming 缓冲
+            input_ids: [B] 各序列的当前 token
+            target_ids: [B] 各序列的目标 token
+
+        Returns:
+            loss: 标量（batch 平均）
+            new_fields: [B, N] 更新后的场状态（detach 后的）
+            new_incomings: [B, N] 更新后的 incoming 缓冲
+        """
+        # 1. Embed → Inject
+        h = self.embed_weight[input_ids]                  # [B, H]
+        field = self._inject(fields, h)                   # [B, N]
+
+        # 2. Propagate
+        incoming = incomings
         for _ in range(self.cfg.prop_steps):
             field, incoming = self._propagate(field, incoming)
 
-        # 3. 读出
-        h_read = self._readout(field)                    # [H]
+        # 3. Readout
+        h_read = self._readout(field)                      # [B, H]
 
         # 4. LM Head
-        logits = self._lm_head(h_read)                   # [V]
+        logits = self._lm_head(h_read)                     # [B, V]
 
         # 5. Loss
-        loss = F.cross_entropy(logits.unsqueeze(0),
-                               target_id.unsqueeze(0))
+        loss = F.cross_entropy(logits, target_ids)
 
-        # 更新场状态（仅保留数值，不保留梯度）
-        with torch.no_grad():
-            self.field.copy_(field.detach())
-
-        return loss
+        return loss, field.detach(), incoming.detach()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  生成
