@@ -31,9 +31,9 @@ cells.append(nbf.v4.new_markdown_cell(
 cells.append(nbf.v4.new_markdown_cell("## 1. 环境"))
 
 cells.append(nbf.v4.new_code_cell(
-    "!rm -rf a-network\n"
-    "!git clone https://github.com/Mn3TR/a-network.git\n"
-    "%cd a-network\n"
+    "!rm -rf /content/a-network\n"
+    "!git clone https://github.com/Mn3TR/a-network.git /content/a-network\n"
+    "%cd /content/a-network\n"
     "!pip install -q torch tokenizers numpy matplotlib datasets\n"
     "import torch\n"
     "print(f'PyTorch {torch.__version__}  CUDA: {torch.cuda.is_available()}')\n"
@@ -58,7 +58,7 @@ cells.append(nbf.v4.new_code_cell(
     "for mod in list(sys.modules.keys()):\n"
     "    if mod.startswith('src.'):\n"
     "        del sys.modules[mod]\n"
-    "!rm -rf src/anetwork/__pycache__\n"
+    "!rm -rf /content/a-network/src/anetwork/__pycache__\n"
     "sys.path.insert(0, '.')\n"
     "\n"
     "from src.anetwork.config import ANetworkConfig\n"
