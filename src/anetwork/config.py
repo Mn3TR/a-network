@@ -53,12 +53,11 @@ class TrainConfig:
 
     # 路径
     tokenizer_path: str = "tokenizer/tokenizer.json"
-    data_dir: str = "dataset/"
     weights_path: str = "output/weights.pt"
     log_dir: str = "log/"
 
-    # 数据集来源: "local" | "huggingface:数据集名" | "url:http://..."
-    dataset_source: str = "local"
+    # 数据集（仅在线，无本地加载）
+    dataset_source: str = "roneneldan/TinyStories"
 
     # 生成
     gen_max_tokens: int = 100

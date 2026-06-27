@@ -259,7 +259,7 @@ def main():
 
     # 加载数据
     print(f"Loading data (source={tcfg.dataset_source}) ...")
-    tokens = load_data(tcfg.data_dir, tokenizer, tcfg.dataset_source)
+    tokens = load_data(tcfg.dataset_source, tokenizer)
 
     train(net, tokens, tcfg, device)
 
