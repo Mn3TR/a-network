@@ -8,7 +8,8 @@ from datasets import load_dataset
 from .tokenizer import TokenizerWrapper
 
 
-def load_data(dataset_source: str, tokenizer: TokenizerWrapper) -> list:
+def load_data(dataset_source: str, tokenizer: TokenizerWrapper,
+              max_texts: int = 0) -> list:
     """下载 HuggingFace 数据集，拼接文本后一次性 tokenize
 
     支持格式:
@@ -16,6 +17,11 @@ def load_data(dataset_source: str, tokenizer: TokenizerWrapper) -> list:
       "用户名/数据集名,config名"                  — 有 config
       "用户名/数据集名,config名,split=名称"       — config + split
       "用户名/数据集名,split=名称"                — 仅 split
+
+    Args:
+        dataset_source: 数据集描述
+        tokenizer: TokenizerWrapper
+        max_texts: 最多加载多少条文本（0=全部，TinyStories 建议 50000 防 OOM）
     """
     parts = dataset_source.split(",")
     ds_name = parts[0]
@@ -30,9 +36,16 @@ def load_data(dataset_source: str, tokenizer: TokenizerWrapper) -> list:
     print(f"  Downloading '{ds_name}' (config={config}, split={split}) ...")
     ds = load_dataset(ds_name, config, split=split)
     text_col = "text" if "text" in ds.features else "content"
-    all_text = "\n".join(ds[text_col])
+
+    # 截取子集避免 OOM
+    texts = ds[text_col]
+    if max_texts > 0 and len(texts) > max_texts:
+        texts = texts[:max_texts]
+        print(f"  Using first {max_texts}/{len(ds)} texts")
+
+    all_text = "\n".join(texts)
     tokens = tokenizer.encode(all_text)
-    print(f"  {len(ds)} texts, {len(tokens)} tokens")
+    print(f"  {len(texts)} texts, {len(tokens)} tokens")
     return tokens
 
 

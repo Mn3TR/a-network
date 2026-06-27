@@ -70,7 +70,7 @@ cells.append(nbf.v4.new_code_cell(
     "TRAIN_EPOCHS = 5\n"
     "LEARNING_RATE = 1e-4\n"
     "GRAD_ACCUM = 4\n"
-    "BATCH_SIZE = 8\n"
+    "BATCH_SIZE = 4    # Colab 免费版建议 ≤4（TinyStories 很大，会占 RAM）\n"
     "DATASET = 'roneneldan/TinyStories'\n"
     "\n"
     "DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
@@ -86,7 +86,7 @@ cells.append(nbf.v4.new_markdown_cell("## 3. 加载数据"))
 
 cells.append(nbf.v4.new_code_cell(
     "from src.anetwork.data import load_data, pack_batch, count_batch_steps\n"
-    "tokens = load_data(DATASET, tokenizer)\n"
+    "tokens = load_data(DATASET, tokenizer, max_texts=50000)\n"  # limit to 50k texts
     "total_steps = count_batch_steps(tokens, BATCH_SIZE)\n"
     "print(f'Tokens: {len(tokens):,}  Steps/epoch: {total_steps:,}  B={BATCH_SIZE}')"
 ))
